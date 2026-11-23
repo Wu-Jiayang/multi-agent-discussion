@@ -4,6 +4,7 @@
 
 - [产品与研究调研](docs/research.md)
 - [MVP 设计](docs/design.md)
+- [演示与测试场景](docs/scenarios.md)
 - [OpenCode 投递与已读实测](docs/opencode-delivery-probe.md)
 
 目前有文档和独立接口探针，尚未实现产品插件或扩展。
