@@ -23,7 +23,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 HTTP = build_opener(ProxyHandler({}))
 MARKERS = ("BEGIN_PROBE", "QUEUED_PROBE", "STEERED_PROBE", "PASSIVE_PROBE", "BLOCKED_PROBE",
-           "MERGED_CONTEXT_PROBE", "PUBLISH_QUEUE", "PUBLISH_STEER")
+           "PUBLISH_QUEUE", "PUBLISH_STEER")
 
 
 def markers_in(value):
@@ -308,15 +308,17 @@ def run_openchamber(model, root, port, password, env):
     shutil.copyfile(fixtures / "openchamber-plugin.js", probe / "plugin/index.js")
     shutil.copyfile(fixtures / "openchamber-service.mjs", probe / "service.mjs")
     (probe / "panel.html").write_text("<!doctype html><p>Headless smoke fixture</p>")
+    bridge_token = secrets.token_urlsafe(32)
     (probe / "bridge.json").write_text(json.dumps({
-        "endpoint": str(root / "endpoint"), "token": secrets.token_urlsafe(32),
+        "endpoint": str(root / "endpoint"), "token": bridge_token,
     }))
     (probe / "package.json").write_text(json.dumps({
         "name": "room-smoke-probe", "type": "module", "version": "0.0.1",
         "openchamber": {"apiVersion": 1, "contributes": {
             "panel": {"id": "room-smoke-probe", "name": "Room Smoke Probe", "entry": "panel.html",
                       "icon": "chat-3-line"},
-            "service": {"entry": "service.mjs", "runtime": "host", "keepRunning": True},
+            "service": {"entry": "service.mjs", "runtime": "host", "keepRunning": True,
+                        "provides": ["opencode"]},
             "opencodePlugin": "plugin",
         }},
     }))
@@ -363,7 +365,7 @@ def run_openchamber(model, root, port, password, env):
         installed = request(chamber_base, "/api/guests", {"path": str(probe)})
         guest = installed["guest"]
         capabilities = guest["capabilities"]["requested"]
-        assert "service" in capabilities and "opencodePlugin" in capabilities, guest
+        assert {"service", "opencodePlugin", "opencode"} <= set(capabilities), guest
         request(chamber_base, path + "/capabilities", {"granted": capabilities}, method="PUT")
         request(chamber_base, path + "/opencode-plugin/global-config", {})
         wait_until(lambda: (root / "endpoint").exists(), "Plugin service did not start headlessly")
@@ -387,27 +389,35 @@ def run_openchamber(model, root, port, password, env):
         def inbox():
             return request(opencode_base, f"/api/session/{recipient}/inbox")["data"]
 
+        def pending():
+            endpoint = (root / "endpoint").read_text()
+            req = Request(endpoint + "/state", headers={"Authorization": f"Bearer {bridge_token}"})
+            with HTTP.open(req, timeout=8) as response:
+                return json.load(response)["pending"]
+
         send(author, f"PUBLISH_QUEUE {recipient}")
-        wait_until(lambda: any(item["delivery"] == "queue" for item in inbox()), "Queue did not arrive")
+        wait_until(lambda: pending() == 1, "Ordinary post did not enter the room backlog")
+        wait_until(lambda: sum("PUBLISH_QUEUE" in m for m, _ in model.requests) >= 2,
+                   "Author did not finish its ordinary post")
+        assert inbox() == [], inbox()
+        assert pending() == 1
         send(author, f"PUBLISH_STEER {recipient}")
-        wait_until(lambda: len(inbox()) == 2, "Steer did not arrive")
-        queued, steered = inbox()
-        assert queued["delivery"] == "queue" and "QUEUED_PROBE" in queued["payload"]["text"], queued
+        wait_until(lambda: len(inbox()) == 1, "Steer did not arrive")
+        [steered] = inbox()
         assert steered["delivery"] == "steer", steered
         text = steered["payload"]["text"]
-        assert text.index("MERGED_CONTEXT_PROBE") < text.index("STEERED_PROBE"), text
-        assert len(steered["payload"]["metadata"]["roomIDs"]) == 2, steered
+        assert text.index("QUEUED_PROBE") < text.index("STEERED_PROBE"), text
+        assert steered["payload"]["metadata"]["roomIDs"] == ["room_1", "room_2"], steered
         model.release.set()
-        wait_until(lambda: any("QUEUED_PROBE" in m and "BEGIN_PROBE" in m
-                               for m, _ in model.requests), "Queued post did not reach model")
+        wait_until(lambda: any("QUEUED_PROBE" in m and "STEERED_PROBE" in m
+                               for m, _ in model.requests), "Combined posts did not reach model")
         recipient_requests = [m for m, _ in model.requests if "BEGIN_PROBE" in m]
-        assert recipient_requests[:3] == [
+        assert recipient_requests[:2] == [
             ["BEGIN_PROBE"],
-            ["BEGIN_PROBE", "STEERED_PROBE", "MERGED_CONTEXT_PROBE"],
-            ["BEGIN_PROBE", "QUEUED_PROBE", "STEERED_PROBE", "MERGED_CONTEXT_PROBE"],
+            ["BEGIN_PROBE", "QUEUED_PROBE", "STEERED_PROBE"],
         ], recipient_requests
         print("Two independent sessions used the installed OpenChamber extension service and bundled OpenCode plugin.")
-        print("No browser or panel opened; one ordinary post queued and two posts combined into one steer.")
+        print("No browser, panel, or debounce timer; a busy recipient received its earlier post and mention in order.")
         print("Recipient requests:", recipient_requests)
 
 

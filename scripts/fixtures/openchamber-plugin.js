@@ -35,21 +35,15 @@ export default {
         },
         options: { codemode: false },
         execute: async ({ recipient, mode }, context) => {
-          const posts = mode === "queue" ? [{ text: "QUEUED_PROBE" }] : [
-            { text: "MERGED_CONTEXT_PROBE" },
-            { text: "STEERED_PROBE", mention: recipient },
-          ];
-          const responses = [];
-          // Separate posts, delivered in one wake when both arrive within the window.
-          for (const post of posts) {
-            const response = await call("/post", {
-              method: "POST",
-              body: JSON.stringify({ author: context.sessionID, recipient, posts: [post] }),
-            });
-            if (!response.ok) throw new Error(`Probe service rejected post: ${response.status}`);
-            responses.push(await response.json());
-          }
-          return { content: JSON.stringify(responses) };
+          const post = mode === "queue"
+            ? { text: "QUEUED_PROBE" }
+            : { text: "STEERED_PROBE", mention: recipient };
+          const response = await call("/post", {
+            method: "POST",
+            body: JSON.stringify({ author: context.sessionID, recipient, posts: [post] }),
+          });
+          if (!response.ok) throw new Error(`Probe service rejected post: ${response.status}`);
+          return { content: JSON.stringify(await response.json()) };
         },
       });
     });
@@ -59,7 +53,7 @@ export default {
       running = true;
       try {
         const response = await call("/next");
-        if (!response.ok) return;
+        if (!response.ok) throw new Error(`Probe service could not dispatch: ${await response.text()}`);
         const { batch } = await response.json();
         if (batch) await ctx.session.prompt(batch);
       } catch (error) {
