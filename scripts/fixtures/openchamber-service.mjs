@@ -11,7 +11,7 @@ const state = existsSync(config.journal)
   ? JSON.parse(readFileSync(config.journal, "utf8"))
   : { pending: [], outstanding: {}, next: 0, trigger: null };
 const { pending, outstanding } = state;
-const MAX_POST_CHARS = 50;
+const MAX_POST_CHARS = 100;
 
 function save() {
   writeFileSync(config.journal + ".tmp", JSON.stringify(state), { mode: 0o600 });
