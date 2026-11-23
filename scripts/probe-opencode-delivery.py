@@ -58,6 +58,11 @@ class Model(BaseHTTPRequestHandler):
         if first and not self.server.release.wait(20):
             self.send_error(504)
             return
+        if (getattr(self.server, "hold_old_batch", False)
+                and "QUEUED_PROBE" in markers and "STEERED_PROBE" not in markers
+                and not self.server.release_batch.wait(20)):
+            self.send_error(504)
+            return
         if first or publish:
             delta = {"role": "assistant", "tool_calls": [{
                 "index": 0, "id": "call_probe", "type": "function",
@@ -388,7 +393,69 @@ def managed_process(args, root, env, log_name):
                 proc.wait()
 
 
-def run_openchamber(model, root, port, password, env, idle_only=False):
+def run_opencode_restart(model, root, port, password, binary, env):
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Basic " + b64encode(f"opencode:{password}".encode()).decode(),
+    }
+    args = [binary, "serve", "--hostname", "127.0.0.1", "--port", str(port)]
+    env = {**env, "OPENCODE_DB": str(root / "restart.sqlite")}
+
+    def api(path, payload=None):
+        req = Request(f"http://127.0.0.1:{port}{path}", headers=headers,
+                      data=None if payload is None else json.dumps(payload).encode())
+        with HTTP.open(req, timeout=8) as response:
+            return json.load(response).get("data")
+
+    def ready():
+        try:
+            api("/api/info")
+            return True
+        except OSError:
+            return False
+
+    def expect(condition, label):
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if condition():
+                return
+            time.sleep(0.05)
+        raise AssertionError(f"{label}; model observations: {model.provider_trace}")
+
+    def prompt(resume, text="PASSIVE_PROBE"):
+        return api(path + "/prompt", {"id": "msg_restart", "text": text,
+                                      "delivery": "queue", "resume": resume})
+
+    with managed_process(args, root, env, "restart-original.log"):
+        expect(ready, "OpenCode did not start")
+        sid = api("/api/session", {
+            "title": "OpenCode restart", "location": {"directory": str(root)},
+            "model": {"providerID": "probe", "id": "fake-model"},
+        })["id"]
+        path = f"/api/session/{sid}"
+        admitted = prompt(False)
+        assert api(path + "/inbox") == [admitted]
+
+    with managed_process(args, root, env, "restart-pending.log"):
+        expect(ready, "OpenCode did not restart")
+        assert api(path + "/inbox") == [admitted]
+        assert prompt(True, "same ID must preserve the original body") == admitted
+        expect(lambda: any("PASSIVE_PROBE" in m for m, _ in model.provider_trace),
+               "Pending ID did not resume after restart")
+        expect(lambda: sid not in api("/api/session/active"), "Resumed execution did not finish")
+        assert not api(path + "/inbox")
+
+    with managed_process(args, root, env, "restart-delivered.log"):
+        expect(ready, "OpenCode did not restart after delivery")
+        assert api(path + "/message/msg_restart")["id"] == "msg_restart"
+        assert prompt(True, "do not re-enqueue delivered ID")["payload"] == admitted["payload"]
+        assert not api(path + "/inbox") and sid not in api("/api/session/active")
+        assert [m for m, _ in model.provider_trace] == [["PASSIVE_PROBE"]]
+        print("OpenCode disk restart: same pending ID resumed once; resubmitting the delivered "
+              "ID after another restart did not re-enqueue it or run the model again.")
+
+
+def run_openchamber(model, root, port, password, env, scenario):
     chamber = shutil.which("openchamber")
     if not chamber:
         raise SystemExit("openchamber is not installed")
@@ -401,8 +468,17 @@ def run_openchamber(model, root, port, password, env, idle_only=False):
     shutil.copyfile(fixtures / "openchamber-service.mjs", probe / "service.mjs")
     (probe / "panel.html").write_text("<!doctype html><p>Headless smoke fixture</p>")
     bridge_token = secrets.token_urlsafe(32)
+    opencode_base = f"http://127.0.0.1:{port}"
+    opencode_auth = "Basic " + b64encode(f"opencode:{password}".encode()).decode()
+    idle_only = scenario in ("--openchamber-idle", "--openchamber-event")
+    race = scenario == "--openchamber-race"
+    restart = scenario == "--openchamber-restart"
+    model.hold_old_batch = race
     (probe / "bridge.json").write_text(json.dumps({
-        "endpoint": str(root / "endpoint"), "token": bridge_token,
+        "endpoint": str(root / "endpoint"), "token": bridge_token, "journal": str(root / "journal.json"),
+        "opencode": opencode_base, "opencodeAuth": opencode_auth,
+        "eventOnly": scenario == "--openchamber-event", "forceQueueRace": race,
+        "loseFirstAck": restart,
     }))
     (probe / "package.json").write_text(json.dumps({
         "name": "room-smoke-probe", "type": "module", "version": "0.0.1",
@@ -414,9 +490,7 @@ def run_openchamber(model, root, port, password, env, idle_only=False):
             "opencodePlugin": "plugin",
         }},
     }))
-    opencode_base = f"http://127.0.0.1:{port}"
     chamber_base = f"http://127.0.0.1:{chamber_port}"
-    opencode_auth = "Basic " + b64encode(f"opencode:{password}".encode()).decode()
 
     def request(base, path, data=None, method=None):
         headers = {"Content-Type": "application/json"}
@@ -505,18 +579,70 @@ def run_openchamber(model, root, port, password, env, idle_only=False):
         def inbox():
             return request(opencode_base, f"/api/session/{recipient}/inbox")["data"]
 
-        def pending():
+        def bridge(route, method="GET"):
             endpoint = (root / "endpoint").read_text()
-            req = Request(endpoint + "/state", headers={"Authorization": f"Bearer {bridge_token}"})
+            req = Request(endpoint + route, method=method,
+                          headers={"Authorization": f"Bearer {bridge_token}"})
             with HTTP.open(req, timeout=8) as response:
-                return json.load(response)["pending"]
+                body = response.read()
+                return json.loads(body) if body else None
+
+        def pending():
+            return bridge("/state")["pending"]
+
+        def restarted_from(pid):
+            try:
+                return bridge("/state")["pid"] != pid
+            except (OSError, ValueError):
+                return False
 
         send(author, f"PUBLISH_QUEUE {recipient}")
+        if race:
+            wait_until(lambda: len(inbox()) == 1, "Race fixture did not stage the ordinary batch")
+            [older] = inbox()
+            assert older["id"] == "msg_room_1" and older["delivery"] == "queue", older
+            send(author, f"PUBLISH_STEER {recipient}")
+            wait_until(lambda: len(inbox()) == 1 and inbox()[0]["delivery"] == "steer",
+                       "Pending older batch was not promoted")
+            assert inbox()[0]["id"] == older["id"] and pending() == 1
+            model.release.set()
+            wait_until(lambda: any("QUEUED_PROBE" in m for m, _ in model.provider_trace),
+                       "Promoted batch did not reach the model")
+            wait_until(lambda: any(item["id"] == "msg_room_2" and item["delivery"] == "steer"
+                                   for item in inbox()), "Urgent batch waited for old model call")
+            assert not model.release_batch.is_set()
+            model.release_batch.set()
+            wait_until(lambda: any("STEERED_PROBE" in m for m, _ in model.provider_trace),
+                       "Urgent batch never reached the model")
+            trace = [m for m, _ in model.provider_trace if "BEGIN_PROBE" in m]
+            assert trace == [["BEGIN_PROBE"], ["BEGIN_PROBE", "QUEUED_PROBE"],
+                             ["BEGIN_PROBE", "QUEUED_PROBE", "STEERED_PROBE"]], trace
+            print("Race recovery: old queue promoted with its original ID; newer steer accepted "
+                  "while the old model request was still blocked:", trace)
+            return
         wait_until(lambda: pending() == 1, "Ordinary post did not enter the room backlog")
         wait_until(lambda: sum("PUBLISH_QUEUE" in m for m, _ in model.requests) >= 2,
                    "Author did not finish its ordinary post")
         assert inbox() == [], inbox()
         assert pending() == 1
+        if restart:
+            before = bridge("/state")["pid"]
+            bridge("/restart-probe", "POST")
+            wait_until(lambda: restarted_from(before), "OpenChamber did not restart the extension")
+            assert pending() == 1 and inbox() == []
+            after = bridge("/state")["pid"]
+            model.release.set()
+            wait_until(lambda: any("QUEUED_PROBE" in m for m, _ in model.provider_trace),
+                       "Persisted backlog was not delivered")
+            wait_until(lambda: restarted_from(after), "Lost acknowledgment did not restart service")
+            wait_until(lambda: not json.loads((root / "journal.json").read_text())["outstanding"],
+                       "Restart did not reconcile the outstanding batch")
+            delivered = request(opencode_base, f"/api/session/{recipient}/message/msg_room_1")
+            assert delivered["data"]["id"] == "msg_room_1" and pending() == 0, delivered
+            assert sum("QUEUED_PROBE" in m for m, _ in model.provider_trace) == 1
+            print("Service restarted twice: restored the buffered post and reconciled the lost "
+                  "acknowledgment using its original message ID without another model request.")
+            return
         if idle_only:
             released = time.monotonic()
             model.release.set()
@@ -529,6 +655,9 @@ def run_openchamber(model, root, port, password, env, idle_only=False):
             assert markers == ["BEGIN_PROBE", "QUEUED_PROBE"], markers
             assert recipient_trace == [["BEGIN_PROBE"], ["BEGIN_PROBE"],
                                        ["BEGIN_PROBE", "QUEUED_PROBE"]], recipient_trace
+            if scenario == "--openchamber-event":
+                assert bridge("/state")["trigger"] == f"execution-event:{recipient}", bridge("/state")
+                print("An execution terminal event triggered delivery; the periodic scan was disabled.")
             try:
                 idle_arrived, _ = idle_events.get(timeout=0.5)
                 print(f"Observed session.idle {(idle_arrived-released)*1000:.0f} ms after model release.")
@@ -560,9 +689,12 @@ def run_openchamber(model, root, port, password, env, idle_only=False):
 
 def main():
     mode = sys.argv[1:]
-    integrated = mode in (["--openchamber"], ["--openchamber-idle"])
-    if mode and not integrated and mode != ["--promotion"]:
-        raise SystemExit("Usage: probe-opencode-delivery.py [--openchamber|--openchamber-idle|--promotion]")
+    scenarios = {"--openchamber", "--openchamber-idle", "--openchamber-event",
+                 "--openchamber-race", "--openchamber-restart"}
+    integrated = len(mode) == 1 and mode[0] in scenarios
+    if mode and not integrated and mode not in (["--promotion"], ["--opencode-restart"]):
+        raise SystemExit(f"Usage: probe-opencode-delivery.py [{'|'.join(sorted(scenarios))}"
+                         "|--promotion|--opencode-restart]")
     binary = shutil.which("opencode")
     if not binary:
         raise SystemExit("opencode is not installed")
@@ -575,6 +707,7 @@ def main():
             model.requests = []
             model.provider_trace = []
             model.release = threading.Event()
+            model.release_batch = threading.Event()
             threading.Thread(target=model.serve_forever, daemon=True).start()
             if not integrated:
                 (root / ".opencode/plugins/probe").mkdir(parents=True)
@@ -594,6 +727,12 @@ def main():
             for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
                 env[key] = str(root / key)
             port = free_port()
+            if mode == ["--opencode-restart"]:
+                try:
+                    run_opencode_restart(model, root, port, password, binary, env)
+                finally:
+                    model.shutdown()
+                return
             with (root / "server.log").open("w+") as log:
                 proc = subprocess.Popen(
                     [binary, "serve", "--hostname", "127.0.0.1", "--port", str(port),
@@ -602,8 +741,7 @@ def main():
                 )
                 try:
                     if integrated:
-                        run_openchamber(model, root, port, password, env,
-                                        idle_only=mode == ["--openchamber-idle"])
+                        run_openchamber(model, root, port, password, env, mode[0])
                     elif mode == ["--promotion"]:
                         run_promotion(model, root, port, password)
                     else:
@@ -620,6 +758,7 @@ def main():
                     raise
                 finally:
                     model.release.set()
+                    model.release_batch.set()
                     proc.terminate()
                     try:
                         proc.wait(timeout=5)

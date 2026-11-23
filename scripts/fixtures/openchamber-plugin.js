@@ -1,4 +1,4 @@
-// Probe-only adapter. Production needs a durable outbox and retry-safe claims.
+// Probe-only adapter. The journal and bridge exist only in temporary test state.
 import { readFileSync } from "node:fs";
 
 const config = JSON.parse(readFileSync(new URL("../bridge.json", import.meta.url)));
@@ -47,23 +47,74 @@ export default {
         },
       });
     });
+    const acknowledge = (item, delivery) => call("/ack", {
+      method: "POST", body: JSON.stringify({ ...item, delivery }),
+    });
     let running = false;
-    const timer = setInterval(async () => {
-      if (running) return;
+    let wakeAgain;
+    async function dispatch(trigger) {
+      if (running) {
+        wakeAgain = trigger;
+        return;
+      }
       running = true;
       try {
-        const response = await call("/next");
+        const response = await call(`/next?trigger=${trigger}`);
         if (!response.ok) throw new Error(`Probe service could not dispatch: ${await response.text()}`);
-        const { batch } = await response.json();
-        if (batch) await ctx.session.prompt(batch);
+        const { batch, promotion } = await response.json();
+        if (promotion) {
+          const response = await fetch(`${config.opencode}/api/session/${promotion.sessionID}/inbox/${promotion.id}`, {
+            method: "PATCH",
+            headers: { authorization: config.opencodeAuth, "content-type": "application/json" },
+            body: JSON.stringify({ delivery: "steer" }),
+            signal: controller.signal,
+          });
+          if (response.ok || response.status === 409) {
+            const result = await acknowledge(promotion, "steer");
+            if (!result.ok) throw new Error(`Promotion acknowledgment failed: ${result.status}`);
+            wakeAgain ??= "recheck";
+          } else {
+            throw new Error(`Promotion failed: ${response.status}`);
+          }
+        }
+        if (batch) {
+          await ctx.session.prompt(batch);
+          const result = await acknowledge(batch, batch.delivery);
+          if (!result.ok) throw new Error(`Batch acknowledgment failed: ${result.status}`);
+        }
       } catch (error) {
         if (error?.code !== "ENOENT" && !controller.signal.aborted) {
           console.error("Room smoke delivery failed", error);
         }
       } finally {
         running = false;
+        if (wakeAgain && !controller.signal.aborted) {
+          const next = wakeAgain;
+          wakeAgain = undefined;
+          queueMicrotask(() => void dispatch(next));
+        }
       }
-    }, 40);
+    }
+    const timer = config.eventOnly ? undefined : setInterval(() => void dispatch("scan"), 40);
+    if (config.eventOnly) {
+      void (async () => {
+        try {
+          for await (const event of ctx.event.subscribe({ signal: controller.signal, types: [
+            "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted",
+            "session.inbox.delivered",
+          ] })) {
+            if (event.type.startsWith("session.execution.")) {
+              // The terminal event can arrive just before the active drain is released.
+              setTimeout(() => void dispatch(`execution-event:${event.data.sessionID}`), 25);
+            } else {
+              void dispatch("inbox-event");
+            }
+          }
+        } catch (error) {
+          if (!controller.signal.aborted) console.error("Probe event stream failed", error);
+        }
+      })();
+    }
     return () => {
       controller.abort();
       clearInterval(timer);
