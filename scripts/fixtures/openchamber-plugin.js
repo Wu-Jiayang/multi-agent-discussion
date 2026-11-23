@@ -38,8 +38,8 @@ export default {
           const post = {
             queue: { text: "QUEUED_PROBE" },
             steer: { text: "STEERED_PROBE", mention: recipient },
-            limit: { text: "界".repeat(999) + "🙂" },
-            "too-long": { text: "界".repeat(1000) + "🙂" },
+            limit: { text: "界".repeat(49) + "🙂" },
+            "too-long": { text: "界".repeat(50) + "🙂" },
           }[mode];
           const response = await call("/post", {
             method: "POST",

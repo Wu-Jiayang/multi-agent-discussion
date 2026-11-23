@@ -600,17 +600,17 @@ def run_openchamber(model, root, port, password, env, scenario):
         if scenario == "--openchamber-length":
             send(author, f"PUBLISH_TOO_LONG {recipient}")
             wait_until(lambda: model.length_error is not None, "Author did not receive a tool error")
-            assert "1001 characters; max 1000" in model.length_error
+            assert "51 characters; max 50" in model.length_error
             assert pending() == 0 and inbox() == [] and not (root / "journal.json").exists()
             send(author, f"PUBLISH_LIMIT {recipient}")
             wait_until(lambda: pending() == 1, "Post exactly at the limit was rejected")
             [post] = json.loads((root / "journal.json").read_text())["pending"]
-            assert post["seq"] == 1 and len(post["text"]) == 1000 and post["text"].endswith("🙂")
+            assert post["seq"] == 1 and len(post["text"]) == 50 and post["text"].endswith("🙂")
             model.release.set()
             wait_until(lambda: ready(opencode_base, f"/api/session/{recipient}/message/msg_room_1"),
                        "Post at limit was not delivered")
-            print("Length guard: 1001 characters returned a tool error without writing a post; "
-                  "1000 Unicode characters were accepted and delivered intact.")
+            print("Length guard: 51 characters returned a tool error without writing a post; "
+                  "50 Unicode characters were accepted and delivered intact.")
             return
         send(author, f"PUBLISH_QUEUE {recipient}")
         if race:
