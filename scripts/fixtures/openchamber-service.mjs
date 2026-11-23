@@ -1,6 +1,7 @@
 // Headless smoke fixture, not the room implementation. No browser is needed.
 import { createServer } from "node:http";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { displayWidth } from "./display-width.mjs";
 
 const config = JSON.parse(readFileSync(new URL("./bridge.json", import.meta.url)));
 const {
@@ -11,7 +12,7 @@ const state = existsSync(config.journal)
   ? JSON.parse(readFileSync(config.journal, "utf8"))
   : { pending: [], outstanding: {}, next: 0, trigger: null };
 const { pending, outstanding } = state;
-const MAX_POST_CHARS = 100;
+const MAX_POST_WIDTH = 100;
 
 function save() {
   writeFileSync(config.journal + ".tmp", JSON.stringify(state), { mode: 0o600 });
@@ -114,9 +115,9 @@ createServer(async (req, res) => {
     }
     const normalized = posts.map(post => ({ ...post, text: post.text.trim() }));
     for (const post of normalized) {
-      const actual = [...post.text].length;
-      if (actual > MAX_POST_CHARS) {
-        return reply(res, { error: "ROOM_MESSAGE_TOO_LONG", actual, max: MAX_POST_CHARS }, 422);
+      const actual = displayWidth(post.text, config.wideRanges);
+      if (actual > MAX_POST_WIDTH) {
+        return reply(res, { error: "ROOM_MESSAGE_TOO_LONG", actual, max: MAX_POST_WIDTH }, 422);
       }
     }
     pending.push(...normalized.map(post => ({ ...post, author, recipient, seq: ++state.next })));

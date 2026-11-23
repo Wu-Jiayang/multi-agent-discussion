@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
@@ -467,6 +468,7 @@ def run_openchamber(model, root, port, password, env, scenario):
     fixtures = Path(__file__).resolve().parent / "fixtures"
     shutil.copyfile(fixtures / "openchamber-plugin.js", probe / "plugin/index.js")
     shutil.copyfile(fixtures / "openchamber-service.mjs", probe / "service.mjs")
+    shutil.copyfile(fixtures / "display-width.mjs", probe / "display-width.mjs")
     (probe / "panel.html").write_text("<!doctype html><p>Headless smoke fixture</p>")
     bridge_token = secrets.token_urlsafe(32)
     opencode_base = f"http://127.0.0.1:{port}"
@@ -475,11 +477,21 @@ def run_openchamber(model, root, port, password, env, scenario):
     race = scenario == "--openchamber-race"
     restart = scenario == "--openchamber-restart"
     model.hold_old_batch = race
+    wide_ranges = []
+    for cp in range(0x110000):
+        char = chr(cp)
+        if (unicodedata.category(char) != "Cn" and
+                unicodedata.east_asian_width(char) in {"W", "F"}):
+            if wide_ranges and cp == wide_ranges[-1][1] + 1:
+                wide_ranges[-1][1] = cp
+            else:
+                wide_ranges.append([cp, cp])
     (probe / "bridge.json").write_text(json.dumps({
         "endpoint": str(root / "endpoint"), "token": bridge_token, "journal": str(root / "journal.json"),
         "opencode": opencode_base, "opencodeAuth": opencode_auth,
         "eventOnly": scenario == "--openchamber-event", "forceQueueRace": race,
         "loseFirstAck": restart,
+        "wideRanges": wide_ranges,
     }))
     (probe / "package.json").write_text(json.dumps({
         "name": "room-smoke-probe", "type": "module", "version": "0.0.1",
@@ -600,17 +612,17 @@ def run_openchamber(model, root, port, password, env, scenario):
         if scenario == "--openchamber-length":
             send(author, f"PUBLISH_TOO_LONG {recipient}")
             wait_until(lambda: model.length_error is not None, "Author did not receive a tool error")
-            assert "101 characters; max 100" in model.length_error
+            assert "display width 101; max 100" in model.length_error
             assert pending() == 0 and inbox() == [] and not (root / "journal.json").exists()
             send(author, f"PUBLISH_LIMIT {recipient}")
             wait_until(lambda: pending() == 1, "Post exactly at the limit was rejected")
             [post] = json.loads((root / "journal.json").read_text())["pending"]
-            assert post["seq"] == 1 and len(post["text"]) == 100 and post["text"].endswith("🙂")
+            assert post["seq"] == 1 and post["text"] == "界" * 48 + "ab🙂"
             model.release.set()
             wait_until(lambda: ready(opencode_base, f"/api/session/{recipient}/message/msg_room_1"),
                        "Post at limit was not delivered")
-            print("Length guard: 101 characters returned a tool error without writing a post; "
-                  "100 Unicode characters were accepted and delivered intact.")
+            print("Width guard: display width 101 returned a tool error without writing a post; "
+                  "width 100 was accepted and delivered intact.")
             return
         send(author, f"PUBLISH_QUEUE {recipient}")
         if race:

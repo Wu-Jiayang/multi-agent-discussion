@@ -38,8 +38,8 @@ export default {
           const post = {
             queue: { text: "QUEUED_PROBE" },
             steer: { text: "STEERED_PROBE", mention: recipient },
-            limit: { text: "界".repeat(99) + "🙂" },
-            "too-long": { text: "界".repeat(100) + "🙂" },
+            limit: { text: "界".repeat(48) + "ab🙂" },
+            "too-long": { text: "界".repeat(48) + "abc🙂" },
           }[mode];
           const response = await call("/post", {
             method: "POST",
@@ -47,7 +47,7 @@ export default {
           });
           const result = await response.json();
           if (result.error === "ROOM_MESSAGE_TOO_LONG") {
-            throw new Error(`ROOM_MESSAGE_TOO_LONG: ${result.actual} characters; max ${result.max}. Shorten and retry.`);
+            throw new Error(`ROOM_MESSAGE_TOO_LONG: display width ${result.actual}; max ${result.max}. Shorten and retry.`);
           }
           if (!response.ok) throw new Error(`Probe service rejected post: ${response.status}`);
           return { content: JSON.stringify(result) };
