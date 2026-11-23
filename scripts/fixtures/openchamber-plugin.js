@@ -30,20 +30,27 @@ export default {
         description: "Post a deterministic smoke-test bundle from this session",
         input: {
           type: "object",
-          properties: { recipient: { type: "string" }, mode: { enum: ["queue", "steer"] } },
+          properties: { recipient: { type: "string" }, mode: { enum: ["queue", "steer", "limit", "too-long"] } },
           required: ["recipient", "mode"],
         },
         options: { codemode: false },
         execute: async ({ recipient, mode }, context) => {
-          const post = mode === "queue"
-            ? { text: "QUEUED_PROBE" }
-            : { text: "STEERED_PROBE", mention: recipient };
+          const post = {
+            queue: { text: "QUEUED_PROBE" },
+            steer: { text: "STEERED_PROBE", mention: recipient },
+            limit: { text: "界".repeat(999) + "🙂" },
+            "too-long": { text: "界".repeat(1000) + "🙂" },
+          }[mode];
           const response = await call("/post", {
             method: "POST",
             body: JSON.stringify({ author: context.sessionID, recipient, posts: [post] }),
           });
+          const result = await response.json();
+          if (result.error === "ROOM_MESSAGE_TOO_LONG") {
+            throw new Error(`ROOM_MESSAGE_TOO_LONG: ${result.actual} characters; max ${result.max}. Shorten and retry.`);
+          }
           if (!response.ok) throw new Error(`Probe service rejected post: ${response.status}`);
-          return { content: JSON.stringify(await response.json()) };
+          return { content: JSON.stringify(result) };
         },
       });
     });

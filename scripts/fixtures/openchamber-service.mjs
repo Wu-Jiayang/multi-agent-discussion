@@ -11,6 +11,7 @@ const state = existsSync(config.journal)
   ? JSON.parse(readFileSync(config.journal, "utf8"))
   : { pending: [], outstanding: {}, next: 0, trigger: null };
 const { pending, outstanding } = state;
+const MAX_POST_CHARS = 1000;
 
 function save() {
   writeFileSync(config.journal + ".tmp", JSON.stringify(state), { mode: 0o600 });
@@ -111,7 +112,14 @@ createServer(async (req, res) => {
         !posts.length || !posts.every(post => typeof post.text === "string")) {
       return reply(res, {}, 400);
     }
-    pending.push(...posts.map(post => ({ ...post, author, recipient, seq: ++state.next })));
+    const normalized = posts.map(post => ({ ...post, text: post.text.trim() }));
+    for (const post of normalized) {
+      const actual = [...post.text].length;
+      if (actual > MAX_POST_CHARS) {
+        return reply(res, { error: "ROOM_MESSAGE_TOO_LONG", actual, max: MAX_POST_CHARS }, 422);
+      }
+    }
+    pending.push(...normalized.map(post => ({ ...post, author, recipient, seq: ++state.next })));
     save();
     reply(res, { accepted: posts.length });
   } catch {

@@ -45,11 +45,12 @@ class Model(BaseHTTPRequestHandler):
         last = data.get("messages", [])[-1]
         publish = None
         if last.get("role") == "user" and "probe_publish" in available:
-            publish = re.search(r"(PUBLISH_QUEUE|PUBLISH_STEER) (ses_[\w-]+)",
+            publish = re.search(r"PUBLISH_(QUEUE|STEER|LIMIT|TOO_LONG) (ses_[\w-]+)",
                                 json.dumps(last))
         if publish:
-            mode = "queue" if publish[1] == "PUBLISH_QUEUE" else "steer"
-            args = {"recipient": publish[2], "mode": mode}
+            args = {"recipient": publish[2], "mode": publish[1].lower().replace("_", "-")}
+        if last.get("role") == "tool" and "ROOM_MESSAGE_TOO_LONG" in json.dumps(last):
+            self.server.length_error = json.dumps(last)
         if markers:
             self.server.requests.append((markers, first))
             raw = json.dumps(data.get("messages"))
@@ -596,6 +597,21 @@ def run_openchamber(model, root, port, password, env, scenario):
             except (OSError, ValueError):
                 return False
 
+        if scenario == "--openchamber-length":
+            send(author, f"PUBLISH_TOO_LONG {recipient}")
+            wait_until(lambda: model.length_error is not None, "Author did not receive a tool error")
+            assert "1001 characters; max 1000" in model.length_error
+            assert pending() == 0 and inbox() == [] and not (root / "journal.json").exists()
+            send(author, f"PUBLISH_LIMIT {recipient}")
+            wait_until(lambda: pending() == 1, "Post exactly at the limit was rejected")
+            [post] = json.loads((root / "journal.json").read_text())["pending"]
+            assert post["seq"] == 1 and len(post["text"]) == 1000 and post["text"].endswith("🙂")
+            model.release.set()
+            wait_until(lambda: ready(opencode_base, f"/api/session/{recipient}/message/msg_room_1"),
+                       "Post at limit was not delivered")
+            print("Length guard: 1001 characters returned a tool error without writing a post; "
+                  "1000 Unicode characters were accepted and delivered intact.")
+            return
         send(author, f"PUBLISH_QUEUE {recipient}")
         if race:
             wait_until(lambda: len(inbox()) == 1, "Race fixture did not stage the ordinary batch")
@@ -690,7 +706,7 @@ def run_openchamber(model, root, port, password, env, scenario):
 def main():
     mode = sys.argv[1:]
     scenarios = {"--openchamber", "--openchamber-idle", "--openchamber-event",
-                 "--openchamber-race", "--openchamber-restart"}
+                 "--openchamber-race", "--openchamber-restart", "--openchamber-length"}
     integrated = len(mode) == 1 and mode[0] in scenarios
     if mode and not integrated and mode not in (["--promotion"], ["--opencode-restart"]):
         raise SystemExit(f"Usage: probe-opencode-delivery.py [{'|'.join(sorted(scenarios))}"
@@ -706,6 +722,7 @@ def main():
         with ThreadingHTTPServer(("127.0.0.1", 0), Model) as model:
             model.requests = []
             model.provider_trace = []
+            model.length_error = None
             model.release = threading.Event()
             model.release_batch = threading.Event()
             threading.Thread(target=model.serve_forever, daemon=True).start()
