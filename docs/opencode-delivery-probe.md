@@ -36,11 +36,19 @@
 
 OpenChamber 2.7.3 的 OpenCode 代理用于读 `/api/session/active` 和会话消息，不能用它提交 `queue` / `steer`；这次的写入在服务端插件内完成。探针的地址和凭据只用于临时同机实例，不作为正式配置协议。示例队列是内存的，领取消费后没有持久确认，**不能用作产品的补投实现**。此集成场景验证的是普通帖仍在房间队列时的按序合批，尚未覆盖旧批已进 inbox、重启恢复或实际 UI。面板从未打开也能正常投递。
 
+## 两种忙碌投递策略的对照
+
+- **房间缓冲，空闲后投递**（`--openchamber-idle`）：普通帖在忙碌期间只留在房间，不发送点名，不需要人为唤醒。释放被模拟模型挂起的请求后，工具和当前轮继续执行，后台观察到目标不在 `/api/session/active` 后自动提交帖子。两组各三次本机测试，从释放请求到下一次模型收到帖子共 **56–105 ms**，包含旧轮剩余步骤和探针的 40 ms 扫描间隔，不是线上延迟保证。第二组同时监听 OpenCode SSE：三次都观察到 `session.execution.succeeded`，没有观察到 `session.idle`。因此不应只订阅 `session.idle`；推荐监听 `session.execution.*` 的终态作为快速检查信号，再查 `/api/session/active`。SSE 不重放，断线、重启、重新连接以及低频扫描应重新检查有积压的收件人。探针的投递本身仍由扫描触发。
+- **提前入 OpenCode inbox，再转 `steer`**（`--promotion`）：只把较新的 Q2 改成 `steer` 会让 Q2 和紧急帖越过 Q1。当 Q1、Q2 和紧急帖的更新都赶在同一个模型边界前完成，三条确实按 Q1 → Q2 → 紧急帖一起进入下一次模型调用。但当运行时在多次请求之间继续前进，旧帖可以先分开进入两个模型请求，下一次更新已送达条目返回 **HTTP 409**；最后紧急帖单独进入下一次请求。接口只改一个待投递条目的模式，不能原地追加正文或原子合并多个条目。
+- **推荐**：房间缓冲作为常规策略，保留按序的原文。单条升级只作为已经提交后的补救，不作为常规合批机制。若原文极端超出模型可接收范围，设计需明确分批、优先级和排序的取舍，不能假称可无限放入一批。
+
 复现（从项目根目录运行）：
 
 ```bash
 python3 scripts/probe-opencode-delivery.py
 python3 scripts/probe-opencode-delivery.py --openchamber
+python3 scripts/probe-opencode-delivery.py --openchamber-idle
+python3 scripts/probe-opencode-delivery.py --promotion
 ```
 
 需要 Python 3 和 PATH 上的 OpenCode V2；第二条另外需要 OpenChamber 和 Node.js 22 或更新版本。探针默认使用 `/tmp/opencode`（存在时），创建临时目录并自行清理。参考 [OpenCode 服务端插件与会话 hooks](https://opencode.ai/docs/build/plugins/server)、[OpenAPI](https://opencode.ai/docs/openapi.json)。

@@ -23,7 +23,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 HTTP = build_opener(ProxyHandler({}))
 MARKERS = ("BEGIN_PROBE", "QUEUED_PROBE", "STEERED_PROBE", "PASSIVE_PROBE", "BLOCKED_PROBE",
-           "PUBLISH_QUEUE", "PUBLISH_STEER")
+           "PUBLISH_QUEUE", "PUBLISH_STEER", "OLDER_ONE", "OLDER_TWO", "URGENT_NOW")
 
 
 def markers_in(value):
@@ -52,6 +52,9 @@ class Model(BaseHTTPRequestHandler):
             args = {"recipient": publish[2], "mode": mode}
         if markers:
             self.server.requests.append((markers, first))
+            raw = json.dumps(data.get("messages"))
+            ordered = sorted(markers, key=raw.index)
+            self.server.provider_trace.append((ordered, time.monotonic()))
         if first and not self.server.release.wait(20):
             self.send_error(504)
             return
@@ -148,6 +151,10 @@ def run(model, root, port, password):
             return api("/api/info")
         except (OSError, URLError):
             return False
+        except RuntimeError as error:
+            if str(error).startswith("/api/info: HTTP 503 "):
+                return False
+            raise
 
     wait_until(ready)
     location = {"directory": str(root)}
@@ -281,6 +288,91 @@ def free_port():
         return probe_socket.getsockname()[1]
 
 
+def run_promotion(model, root, port, password):
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Basic " + b64encode(f"opencode:{password}".encode()).decode(),
+    }
+
+    def api(path, payload=None, method=None):
+        req = Request(f"http://127.0.0.1:{port}{path}", headers=headers, method=method,
+                      data=None if payload is None else json.dumps(payload).encode())
+        with HTTP.open(req, timeout=8) as response:
+            body = response.read()
+            return json.loads(body).get("data") if body else None
+
+    def expect(check, label):
+        limit = time.monotonic() + 10
+        while time.monotonic() < limit:
+            if check():
+                return
+            time.sleep(0.02)
+        raise AssertionError(f"{label}: {model.provider_trace}")
+
+    def ready():
+        try:
+            api("/api/info")
+            return True
+        except OSError:
+            return False
+
+    expect(ready, "OpenCode failed to start")
+    for trial in ("promote-one", "promote-all", "advance-between-updates"):
+        expect(lambda: not api("/api/session/active"), "Previous trial is still active")
+        model.release.clear()
+        index = len(model.provider_trace)
+        sid = api("/api/session", {
+            "title": trial, "location": {"directory": str(root)},
+            "model": {"providerID": "probe", "id": "fake-model"},
+            "permissions": [{"action": "probe_hold", "resource": "*", "effect": "allow"}],
+        })["id"]
+        path = f"/api/session/{sid}"
+
+        def send(name, text, delivery):
+            return api(path + "/prompt", {"id": f"msg_{trial}_{name}", "text": text,
+                                          "delivery": delivery})
+
+        def promote(item):
+            api(path + "/inbox/" + item["id"], {"delivery": "steer"}, method="PATCH")
+
+        send("seed", "BEGIN_PROBE", "queue")
+        expect(lambda: len(model.provider_trace) > index, "Initial model call did not arrive")
+        one = send("one", "OLDER_ONE", "queue")
+        two = send("two", "OLDER_TWO", "queue")
+        if trial != "promote-one":
+            promote(one)
+        if trial == "advance-between-updates":
+            model.release.set()
+            expect(lambda: len(model.provider_trace) >= index + 3 and
+                   not api("/api/session/active"), "Older items did not drain")
+            # Pause the publisher across a runtime boundary: the second PATCH
+            # now races with an inbox item that has already been delivered.
+            try:
+                promote(two)
+            except HTTPError as error:
+                assert error.code == 409, error.code
+                print("Promotion of already delivered item: HTTP 409")
+            else:
+                raise AssertionError("Expected conflict for already delivered item")
+        else:
+            promote(two)
+        send("urgent", "URGENT_NOW", "steer")
+        model.release.set()
+        expect(lambda: any("URGENT_NOW" in m for m, _ in model.provider_trace[index:])
+               and not api("/api/session/active"), "Trial did not finish")
+        trace = [m for m, _ in model.provider_trace[index:]]
+        print(f"{trial}: {trace}")
+        if trial == "promote-one":
+            assert trace[1] == ["BEGIN_PROBE", "OLDER_TWO", "URGENT_NOW"], trace
+            assert trace[2][-1] == "OLDER_ONE", trace
+        elif trial == "promote-all":
+            assert trace[1] == ["BEGIN_PROBE", "OLDER_ONE", "OLDER_TWO", "URGENT_NOW"], trace
+            assert len(trace) == 2, trace
+        else:
+            assert trace[1] == ["BEGIN_PROBE", "OLDER_ONE"], trace
+            assert "URGENT_NOW" in trace[-1] and len(trace) >= 3, trace
+
+
 @contextmanager
 def managed_process(args, root, env, log_name):
     with (root / log_name).open("w+") as log:
@@ -296,7 +388,7 @@ def managed_process(args, root, env, log_name):
                 proc.wait()
 
 
-def run_openchamber(model, root, port, password, env):
+def run_openchamber(model, root, port, password, env, idle_only=False):
     chamber = shutil.which("openchamber")
     if not chamber:
         raise SystemExit("openchamber is not installed")
@@ -383,6 +475,30 @@ def run_openchamber(model, root, port, password, env):
         recipient = new_session("Room recipient", "probe_hold")
         author = new_session("Room author", "probe_publish")
         assert author != recipient
+        idle_events = queue.SimpleQueue()
+        observed_events = []
+        if idle_only:
+            subscribed = threading.Event()
+
+            def observe_idle():
+                req = Request(opencode_base + "/api/event", headers={"Authorization": opencode_auth})
+                try:
+                    with HTTP.open(req, timeout=15) as response:
+                        subscribed.set()
+                        for line in response:
+                            if not line.startswith(b"data:"):
+                                continue
+                            event = json.loads(line[5:])
+                            if event.get("data", {}).get("sessionID") == recipient:
+                                observed_events.append(event["type"])
+                            if (event.get("type") == "session.idle" and
+                                    event.get("data", {}).get("sessionID") == recipient):
+                                idle_events.put((time.monotonic(), event["created"]))
+                except (OSError, ValueError):
+                    pass
+
+            threading.Thread(target=observe_idle, daemon=True).start()
+            assert subscribed.wait(8), "Idle event subscription was not established"
         send(recipient, "BEGIN_PROBE")
         wait_until(lambda: any(hold for _, hold in model.requests), "Recipient did not start")
 
@@ -401,6 +517,27 @@ def run_openchamber(model, root, port, password, env):
                    "Author did not finish its ordinary post")
         assert inbox() == [], inbox()
         assert pending() == 1
+        if idle_only:
+            released = time.monotonic()
+            model.release.set()
+            wait_until(lambda: any("QUEUED_PROBE" in m for m, _ in model.provider_trace),
+                       "Ordinary backlog did not automatically flush when the recipient went idle")
+            marker_index = next(i for i, (markers, _) in enumerate(model.provider_trace)
+                                if "QUEUED_PROBE" in markers)
+            markers, arrived = model.provider_trace[marker_index]
+            recipient_trace = [m for m, _ in model.provider_trace if "BEGIN_PROBE" in m]
+            assert markers == ["BEGIN_PROBE", "QUEUED_PROBE"], markers
+            assert recipient_trace == [["BEGIN_PROBE"], ["BEGIN_PROBE"],
+                                       ["BEGIN_PROBE", "QUEUED_PROBE"]], recipient_trace
+            try:
+                idle_arrived, _ = idle_events.get(timeout=0.5)
+                print(f"Observed session.idle {(idle_arrived-released)*1000:.0f} ms after model release.")
+            except queue.Empty:
+                print(f"No session.idle observed; recipient events: {list(dict.fromkeys(observed_events))}")
+            print(f"Backlog flushed automatically: {(arrived-released)*1000:.0f} ms "
+                  f"from releasing blocked model response (includes tool and model continuation).")
+            print("Recipient requests:", recipient_trace)
+            return
         send(author, f"PUBLISH_STEER {recipient}")
         wait_until(lambda: len(inbox()) == 1, "Steer did not arrive")
         [steered] = inbox()
@@ -422,9 +559,10 @@ def run_openchamber(model, root, port, password, env):
 
 
 def main():
-    integrated = sys.argv[1:] == ["--openchamber"]
-    if sys.argv[1:] and not integrated:
-        raise SystemExit("Usage: probe-opencode-delivery.py [--openchamber]")
+    mode = sys.argv[1:]
+    integrated = mode in (["--openchamber"], ["--openchamber-idle"])
+    if mode and not integrated and mode != ["--promotion"]:
+        raise SystemExit("Usage: probe-opencode-delivery.py [--openchamber|--openchamber-idle|--promotion]")
     binary = shutil.which("opencode")
     if not binary:
         raise SystemExit("opencode is not installed")
@@ -435,6 +573,7 @@ def main():
         root = Path(temp)
         with ThreadingHTTPServer(("127.0.0.1", 0), Model) as model:
             model.requests = []
+            model.provider_trace = []
             model.release = threading.Event()
             threading.Thread(target=model.serve_forever, daemon=True).start()
             if not integrated:
@@ -463,7 +602,10 @@ def main():
                 )
                 try:
                     if integrated:
-                        run_openchamber(model, root, port, password, env)
+                        run_openchamber(model, root, port, password, env,
+                                        idle_only=mode == ["--openchamber-idle"])
+                    elif mode == ["--promotion"]:
+                        run_promotion(model, root, port, password)
                     else:
                         run(model, root, port, password)
                 except Exception:
