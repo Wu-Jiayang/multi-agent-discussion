@@ -52,7 +52,7 @@ OpenChamber 2.7.3 的 OpenCode 代理用于读 `/api/session/active` 和会话�
 | 旧批已进 inbox（`--openchamber-race`） | 故意让普通帖先成为 OpenCode 的待投 `queue`。点名后检查旧批原 ID 升级；放行当前请求，再故意挂住包含旧批的下一次模型请求。 | 旧批先进入模型；它的请求仍挂起时，新 `steer` 已进入 inbox。随后模型按旧帖 → 点名顺序获取正文。新帖不等待旧批完成，既没有撤销也没有复制旧批。已送达条目返回 `409` 另由 `--promotion` 覆盖。 |
 | 扩展服务重启（`--openchamber-restart`） | 第一次在普通帖仍缓冲时让扩展进程退出；第二次在 OpenCode 接纳后、房间写入确认前退出。每次验证由 OpenChamber 拉起了另一个服务进程。 | 积压从日志恢复，使用原消息 ID。确认丢失后从会话记录对账，没有额外模型调用。 |
 | OpenCode 进程重启（`--opencode-restart`） | 隔离磁盘数据库，先在 inbox 停放一个 ID，重启后按同 ID `resume: true`；送达后再重启并重提同 ID。 | 待投队列及原文保留，恢复只触发一次模型调用；第二次重启后已送达 ID 不重新入队或运行。 |
-| Agent 发帖限长（`--openchamber-length`） | 真实会话连续调用发帖工具，分别提交包含中文和 emoji 的 101、100 字符文本。 | 101 字符返回 `ROOM_MESSAGE_TOO_LONG`，未写房间记录或收件 inbox。100 字符完整写入并送达。文件发布、提问和撤回工具仍只在设计里。 |
+| Agent 发帖限长（`--openchamber-length`） | 真实会话连续调用发帖工具，分别提交包含中文和 emoji 的 101、100 字符文本。 | 101 字符返回 `ROOM_MESSAGE_TOO_LONG`，未写房间记录或收件 inbox。100 字符完整写入并送达。路径点击、提问和撤回仍只在设计里。 |
 
 这些是可控的集成场景，不承诺生产环境的并发、双进程同时崩溃、断电持久性或实际模型线路稳定性。
 
