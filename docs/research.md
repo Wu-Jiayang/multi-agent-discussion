@@ -6,7 +6,7 @@
 
 最接近目标的产品是 **Google Antigravity `/swarm`**：独立会话通过共享留言板直接交流，有未读状态、`@all`、休眠唤醒和用于防停滞的监控角色。最接近的开源实现分为三类：**OpenClaw** 的群聊分发和轮次控制、**aweb** 的持久房间和唤醒通知、**Station** 的长期异步研究论坛。它们各自解决一部分问题。
 
-本项目的关键差异是**讨论消息发到房间即面向全员**，而非每次挑选“关心此事”的成员。全员收到消息或获得处理机会，和全员必须回复，是两件事。至于每条消息是否单独触发一次模型执行、是否合并通知、发送者是否也醒，以及忙碌会话如何接收，留待设计访谈。
+本项目的关键差异是**讨论消息发到房间即面向全员**，而非每次挑选“关心此事”的成员。全员可以阅读讨论，但不必回复。首版如何合并未读提醒、处理发帖者自身和忙碌会话，见[当前设计](design.md)。
 
 ## 筛选标准
 
@@ -57,7 +57,7 @@
 ## 对 OpenChamber / OpenCode 的已核实接口
 
 - **OpenChamber**：[扩展 SDK](https://docs.openchamber.dev/sdk)支持全屏页面，并能通过 `contributes.opencodePlugin` 随扩展分发 OpenCode 插件。[Host API](https://docs.openchamber.dev/sdk/host)还支持扩展自有后台服务与会话事件（例如 `turn-finished`），无需打开 UI 才能接收。发布和运行的具体边界须按目标版本实测。
-- **OpenCode V2**：[服务端插件](https://opencode.ai/docs/build/plugins/server)可注册工具，[插件 RPC](https://opencode.ai/docs/build/plugins/rpc)可公开自定义方法和事件。[公开 API 规范](https://opencode.ai/docs/openapi.json)的 `session.prompt` 可接受 `delivery: "queue" | "steer"`：`queue` 对应上一轮谈到的 `followup`；`steer` 在活跃轮次的下一个可接收点送入。接口返回已接纳的 inbox 项，不代表 agent 已执行或已读。`resume: false` 只接纳，不安排执行。
+- **OpenCode V2**：[服务端插件](https://opencode.ai/docs/build/plugins/server)可注册工具，[插件 RPC](https://opencode.ai/docs/build/plugins/rpc)可公开自定义方法和事件。[公开 API 规范](https://opencode.ai/docs/openapi.json)的 `session.prompt` 可接受 `delivery: "queue" | "steer"`：`queue` 在会话空闲时启动执行，忙碌时排到后续轮次，不抢占当前轮；`steer` 在活跃轮次的下一个可接收点送入。接口返回已接纳的 inbox 项，不代表 agent 已执行或已读。`resume: false` 只接纳，不安排执行。
 - **持久化边界**：OpenCode 原生事件流与插件 RPC 订阅是实时流，断线期间的事件不会重放。共用讨论记录、成员游标及失败补投机制，应与实时信号分开研究。还需用真实 V2 会话确认忙碌、空闲、等待权限和服务重启时的交付行为与可观测状态。
 
 ## 设计访谈与验证线索
