@@ -1,6 +1,6 @@
 # 多智能体讨论与协作：产品和研究调研
 
-调研截至 2026-11-22，OpenClaw 专项复核于 2026-11-24。本文为设计访谈提供事实，不是设计方案，也没有验证任何产品的本地运行行为。优先采用官方文档、公开源码、论文及原始讨论记录。
+调研截至 2026-11-22，OpenClaw 与飞书专项复核于 2026-11-24。本文为设计访谈提供事实，不是设计方案，也没有验证任何产品的本地运行行为。优先采用官方文档、公开源码、论文及原始讨论记录。
 
 ## 结论
 
@@ -47,6 +47,17 @@
 - **飞书社区实现**：[`openclaw-team-in-feishu` 的守护进程](https://github.com/nativeProductor/openclaw-team-in-feishu/blob/9d8472d8d6b3952670c2b802b1539cf6e7ede309/lib/daemon.js)轮询飞书话题，禁用原生接入来避免重复触发，把记录注入提示词、调用对应 Agent，再代为发帖。主持模式按点名调度；自由发言模式仍由守护进程串行询问，每人可返回 `[SKIP]`。共享讨论和沉默在这里都存在，但静默判断前已启动了一次模型调用。
 
 **与本项目的差异**：两者都能让独立 Agent 在共享讨论中互相回应。区别在于，OpenClaw 多 Bot 路径把获准的群消息作为具体正文输入交给会话；本项目先将帖子记入共享时间线和各成员的未读，提醒只带概览。普通提醒等轮末按当前未读合并，`@` 走独立的紧急路径；房间统一扣自动唤醒额度，耗尽后由人继续。最有用的对照用例是：A 忙时 B 连发三条普通帖，再单独 `@A`，比较实际启动次数、当前轮是否收到点名、未读能否补看，以及是否能一键停住全房间。
+
+## 能否直接用飞书群做讨论室？
+
+**可以省掉群聊产品层，不能省掉 OpenCode 调度层。** 如果人类直接在飞书群操作，可让飞书保存唯一的群消息正文，并复用人员、聊天界面、消息历史、回复、原生 `@` 和客户端通知。OpenChamber 只需提供项目与群的绑定、成员会话入口和讨论控制。将飞书群完整复制一份到 OpenChamber，则会多出双向同步、一致性和权限问题，削弱节省。
+
+- **消息和历史**：[发消息](https://open.feishu.cn/document/server-docs/im-v1/message/create)、[回复](https://open.feishu.cn/document/server-docs/im-v1/message/reply)和[历史](https://open.feishu.cn/document/server-docs/im-v1/message/list)均有 API。群历史要求应用机器人在群且具备相应权限；话题回复要按话题查询。官方历史接口按创建时间分页，不能直接替代本设计的严格 `roomSeq`；若要保留该语义，仍需本地顺序索引，或明确改用飞书顺序。
+- **事件与恢复**：应用可用[长连接或 Webhook](https://open.feishu.cn/document/server-docs/event-subscription-guide/overview)收事件。[群消息事件](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)记录人类、Bot 与点名；可申请收用户及其他 Bot 消息的 `im:message.group_msg.include_bot:read`，但不含本 Bot 自己发送的消息。以 `message_id` 去重，自己发的帖用发送响应登记；发送 `uuid` 的平台去重仅一小时。仍需保存必要的事件处理状态，并实测断线后用历史补齐，不把事件重试当作永久日志。只会推送的[自定义 Webhook 机器人](https://open.feishu.cn/document/client-docs/bot-v3/bot-overview)不能单独承担接收。
+- **一个 Bot 或每 Agent 一个 Bot**：一个应用 Bot 可以把多会话发言带署名发进群，部署简单；但飞书显示的原生作者都是这个 Bot，用户不能用原生 `@` 选中虚拟 Agent。原生点名和独立作者身份需要独立 Bot 账号；[官方 FAQ](https://open.feishu.cn/document/faq/bot)明确不支持用 OpenAPI 创建机器人，需预先配好应用和权限。因而不能把「随建房生成任意名字和原生 Bot 身份」当作平台现成能力。单 Bot 可用文本 `@显示名` 由桥接层识别，但需实测飞书客户端输入体验。
+- **必须自己做的部分**：项目、群、Agent 与 OpenCode 会话的映射；谁已把全文读进 Agent 上下文；忙时合并未读、普通 `queue` 与紧急 `steer`；房间共享额度、暂停、恢复、去重。[飞书的已读查询](https://open.feishu.cn/document/server-docs/im-v1/message/read_users)只返回已读用户，Bot 只能查自己七天内发的消息，不能拿来判断某个 OpenCode 会话是否已读。
+
+若首要目标是让同一飞书租户内的团队尽快试用，值得先用现有测试群、一个应用 Bot 和两个独立 OpenCode 会话验证。先只做飞书时间线，不复制聊天 UI；验证收发、点名解析、自发帖去重、断线补读和暂停后不再唤醒。若独立原生 Bot 名字和 `@` 是必需体验，再用两个预配置 Bot 对照。接入也意味着讨论正文会离开本机，应先确认租户权限、允许接入的群及代码或日志能否发送。这是待验证的产品选项，当前内置讨论室设计没有切换。
 
 ## 科研：哪些案例有真实讨论？
 
