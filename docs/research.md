@@ -1,0 +1,98 @@
+# 多智能体讨论与协作：产品和研究调研
+
+调研截至 2026-11-22，OpenClaw 与飞书专项复核于 2026-11-24。本文为设计访谈提供事实，不是设计方案，也没有验证任何产品的本地运行行为。优先采用官方文档、公开源码、论文及原始讨论记录。
+
+## 结论
+
+**OpenClaw + Discord 已能让独立 Agent 在共享群里互相接话**，可作为双模型辩论的开源对照；与本项目的差别主要是何时唤醒、怎么读历史、如何停下。**Google Antigravity `/swarm`** 更接近内置讨论室的形态，有共享留言板、未读状态、`@all` 和休眠唤醒。**aweb** 的持久房间和轻量通知、**Station** 的异步研究论坛可分别参考。
+
+本项目的关键差异是**讨论消息发到房间即面向全员**，而非每次挑选“关心此事”的成员。全员可以阅读讨论，但不必回复。首版如何合并未读提醒、处理发帖者自身和忙碌会话，见[当前设计](design.md)。
+
+## 筛选标准
+
+- **讨论**：参与者能看到并针对彼此的中间发言提出问题、反驳、补充或修正。共享任务列表、并行派活、最后汇报本身不算。
+- **对照案例**：有跨 agent 的质疑或验证，但由固定流程传递产物，不能自由在共享频道互相接话。它们可以验证某些机制的价值，不能当作群聊已存在的证据。
+- **证据分层**：公开源码和讨论记录可核对机制；官方文档可核对公开行为；论文、预印本和产品发布说明分别标注。不从研究结果反推出未公开的运行机制。
+
+## 产品与开源实现
+
+| 系统 | 怎么讨论 | 怎么唤醒 | 值得参考 / 边界 |
+| --- | --- | --- | --- |
+| [Google Antigravity `/swarm`](https://antigravity.google/docs/swarm)（[2026-11-10 发布预览](https://antigravity.google/blog/gemini-4-carbon-in-google-antigravity)） | 所有交流都放在同一块留言板。成员在独立会话中互相问问题、贴证据和差异摘要；验证者发现问题后反馈给原作者。 | `@name`、`@group`、`@all`；等待中的成员被提及才醒。所有人都沉默但工作未完时，监控角色会介入。 | 最近似的产品对标：按发言者/接收者筛选、个人未读线、成员状态、回放、跳转独立会话。`@all` 可广播，文档未表明普通发言默认全员唤醒。核心实现未公开。 |
+| [OpenClaw 多 Bot 群聊](#openclaw-群聊如何运行) | 多个 Bot 可以同群，绑定到不同 Agent；Discord 支持普通消息接话，飞书官方插件支持 Bot 互相 `@`。 | 平台投递消息，接收方检查群权限、点名、防循环，再交自己的会话处理。 | 可直接做同群反驳和修订；群历史、会话队列和防循环计数各有用途，未核实有本项目的逐成员未读与房间总额度组合。 |
+| [OpenClaw Broadcast Groups](https://docs.openclaw.ai/channels/broadcast-groups)（实验） | Gateway 为一条入站消息启动多个独立会话；下一轮传递带作者的回复节选。 | 渠道先做准入，协调器再按点名与预算选择参与者。 | 允许 `NO_REPLY`；轮次与预算绑定单条入站消息，重启不恢复。详见下方源码复核。 |
+| [aweb Team Room](https://github.com/awebai/aweb/blob/main/docs/mail-and-chat.md#shared-team-room)（MIT，`main` 已有代码，[尚待正式发布](https://github.com/awebai/aweb/blob/main/docs/design/team-room-v1.md)） | 每队一个共享房间，成员可读保留历史；房间面向公告，另有邮件和 agent 聊天。 | 一次发帖给其他现有成员各发一个轻量通知；正文单独取。实际唤醒依赖宿主集成。 | 最贴近「发一条，通知多人」的开源传输参考。房间默认不期待回复；房间通知、正文持久化和已读是不同概念。[事件与重连](https://github.com/awebai/aweb/blob/main/docs/receiving-events.md)文档说明事件流没有可恢复游标，重连后读待处理状态。 |
+| [Microsoft Agent Framework Group Chat](https://learn.microsoft.com/en-us/agent-framework/workflows/orchestrations/group-chat) 与 [AutoGen Core Group Chat](https://microsoft.github.io/autogen/stable/user-guide/core-user-guide/design-patterns/group-chat.html) | Group Chat 由协调器选下一位发言；AutoGen Core 示例让成员共享话题，成员发布和接收消息。 | 讨论流程选择谁发言；共享上下文不自动让每个成员都执行模型轮次。 | 适合参考「人人看到，谁真的发言另作控制」；不是独立 coding session 的离线恢复或唤醒层。 |
+| [Claude Code Agent Teams](https://code.claude.com/docs/en/agent-teams) / [跨会话消息](https://code.claude.com/docs/en/cross-session-messaging) | 独立会话用点对点邮箱和共享任务表，成员可以直接交换发现。官方文档给出的全员发送方式是逐个收件人发送。 | 空闲接收会话可开新轮；同机还有一次性的“对方下次空闲或退出”订阅。 | 适合参考权限边界和完成通知；没有原生共享房间这一层。 |
+| [AgentDebate](https://github.com/DFerryman/AgentDebate)（公开仓库） | VS Code 通过 ACP 驱动包括 OpenCode 在内的不同 agent：先各自提案，再交叉评阅和修订，最后综合。 | 由主持流程启动每阶段；不是自由发帖唤醒。 | 小型实现，适合参考讨论 UI、独立首轮和交叉评阅。会话不跨讨论复用；文档所述工具访问为只读。未做本地验证。 |
+
+**不作为群聊对标：** [Codex 原生子智能体](https://developers.openai.com/codex/agent-configuration/subagents)以派活、跟进和聚合为主。[Responses API 多智能体](https://developers.openai.com/api/docs/guides/responses-multi-agent)另区分 `send_message`（投递而不开新轮）与 `followup_task`（启动或恢复一轮），可参考投递语义。GitHub、Slack 触发属于外部自动化，本身不构成 agent 间讨论。
+
+**aweb 的可复用思路**：[房间写入](https://github.com/awebai/aweb/blob/main/server/src/aweb/messaging/room.py)将正文和收件人通知持久化，提交后才发轻量唤醒信号；[事件接口](https://github.com/awebai/aweb/blob/main/server/src/aweb/routes/events.py)从未处理通知生成 `actionable_room_post`。信号只指向已存消息，接收方再读正文。这样即使实时信号丢失，正文和待处理记录仍有恢复依据。
+
+## OpenClaw 群聊如何运行
+
+以下核对以 [OpenClaw 源码 `ca33faf`](https://github.com/openclaw/openclaw/tree/ca33faf055fd68b1524ee3341ee8f2469d7f3d6c) 为准，未在真实群或特定发布版实跑。同群多 Bot 和 Broadcast Groups 是两条不同的路径。
+
+### Discord：其他 Bot 的发帖也能触发会话
+
+1. **接收与路由**：同一 Gateway 可用[多账号绑定](https://docs.openclaw.ai/concepts/multi-agent)，把不同 Discord Bot 账号路由到不同 Agent。A 发帖后，B 的 Discord 接入独立接收该事件。[接入源码](https://github.com/openclaw/openclaw/blob/ca33faf055fd68b1524ee3341ee8f2469d7f3d6c/extensions/discord/src/monitor/message-handler.preflight.ts)过滤自身消息、检查群与发送者权限、群提及规则和 `allowBots`。`allowBots` 默认开启，但不会绕过 `requireMention`。设为 `"mentions"` 时，需主动点名；单有回复指向或回复通知不算。通过这些检查的 Bot 入站还受防循环限制。
+2. **忙时执行**：[队列规则](https://github.com/openclaw/openclaw/blob/ca33faf055fd68b1524ee3341ee8f2469d7f3d6c/docs/concepts/queue.md)默认 `steer`，但 [steer 源码](https://github.com/openclaw/openclaw/blob/ca33faf055fd68b1524ee3341ee8f2469d7f3d6c/src/auto-reply/reply/agent-runner-steer-adoption.ts)对 Discord 服务器频道和话题有特例：不同身份发来的普通消息保留为后续独立轮，同一请求者的相容输入才可能注入当前轮。`@` 主要决定接不接这条消息，并不会自动将它升为紧急 `steer`。Discord 可在接入时[短窗合并](https://github.com/openclaw/openclaw/blob/ca33faf055fd68b1524ee3341ee8f2469d7f3d6c/extensions/discord/src/monitor/message-dispatcher.ts)同账号、频道、作者、回复目标的合适文本；已经独立接纳的消息各有交付记录，队列的 `collect` 对这种接入按 `followup` 处理。
+3. **历史与防循环**：Bot 消息即使没触发执行，也可以留在可访问的频道历史。构造上下文时，可按权限通过 [Discord REST 补取有界的近期窗口](https://github.com/openclaw/openclaw/blob/ca33faf055fd68b1524ee3341ee8f2469d7f3d6c/extensions/discord/src/monitor/message-handler.recent-history.ts)。[防循环规则](https://github.com/openclaw/openclaw/blob/ca33faf055fd68b1524ee3341ee8f2469d7f3d6c/docs/channels/bot-loop-protection.md)按接收账号、频道和 Bot 对计数，默认 60 秒内允许 20 个事件，超过后进入 60 秒冷却。它限制局部回复风暴，不限制房间累计轮数。
+
+### 飞书与内部广播：两种不同的接话方式
+
+- **飞书多个 Bot**：飞书开放平台提供[接收 Bot 点名以及接收其他 Bot 群消息的权限](https://open.feishu.cn/document/ukTMukTMukTM/uYTM5UjL2ETO14iNxkTN/scope-list?lang=zh-CN)。但 OpenClaw 的 [`@openclaw/feishu` 接收实现](https://github.com/openclaw/openclaw/blob/ca33faf055fd68b1524ee3341ee8f2469d7f3d6c/extensions/feishu/src/bot.ts)要求开启 `allowBots`，并核实群消息确实点名接收 Bot；没点名即使收到事件也丢弃。应用间 `open_id` 不同时，用接收方应用重新查原消息来核实，不靠名字猜。插件[回复时会点名对方](https://docs.openclaw.ai/channels/feishu/access-control#bot-authored-messages)，并用同类防循环限制。早期「飞书无法 Bot 互收」的说法不适用于这里。
+- **Broadcast Groups**：实验性[协调器](https://github.com/openclaw/openclaw/blob/ca33faf055fd68b1524ee3341ee8f2469d7f3d6c/src/auto-reply/group-thread.ts)对一条已通过渠道准入的消息分发。首轮按配置选择被点名者或全员；整轮结束后，下一轮只邀请发过言或被点名的成员，传入带作者的上一轮回复节选。执行次数在启动前预留，失败或沉默也计入；全员沉默、达到轮次或执行上限、取消，都会停止。预算绑定根入站消息，协调状态在内存。即使顺序执行，同轮后发的成员也不会因此收到本轮先发者的节选。
+- **飞书社区实现**：[`openclaw-team-in-feishu` 的守护进程](https://github.com/nativeProductor/openclaw-team-in-feishu/blob/9d8472d8d6b3952670c2b802b1539cf6e7ede309/lib/daemon.js)轮询飞书话题，禁用原生接入来避免重复触发，把记录注入提示词、调用对应 Agent，再代为发帖。主持模式按点名调度；自由发言模式仍由守护进程串行询问，每人可返回 `[SKIP]`。共享讨论和沉默在这里都存在，但静默判断前已启动了一次模型调用。
+
+**与本项目的差异**：两者都能让独立 Agent 在共享讨论中互相回应。区别在于，OpenClaw 多 Bot 路径把获准的群消息作为具体正文输入交给会话；本项目先将帖子记入共享时间线和各成员的未读，提醒只带概览。普通提醒等轮末按当前未读合并，`@` 走独立的紧急路径；房间统一扣自动唤醒额度，耗尽后由人继续。最有用的对照用例是：A 忙时 B 连发三条普通帖，再单独 `@A`，比较实际启动次数、当前轮是否收到点名、未读能否补看，以及是否能一键停住全房间。
+
+## 能否直接用飞书群做讨论室？
+
+**可以省掉群聊产品层，不能省掉 OpenCode 调度层。** 如果人类直接在飞书群操作，可让飞书保存唯一的群消息正文，并复用人员、聊天界面、消息历史、回复、原生 `@` 和客户端通知。OpenChamber 只需提供项目与群的绑定、成员会话入口和讨论控制。将飞书群完整复制一份到 OpenChamber，则会多出双向同步、一致性和权限问题，削弱节省。
+
+- **消息和历史**：[发消息](https://open.feishu.cn/document/server-docs/im-v1/message/create)、[回复](https://open.feishu.cn/document/server-docs/im-v1/message/reply)和[历史](https://open.feishu.cn/document/server-docs/im-v1/message/list)均有 API。群历史要求应用机器人在群且具备相应权限；话题回复要按话题查询。官方历史接口按创建时间分页，不能直接替代本设计的严格 `roomSeq`；若要保留该语义，仍需本地顺序索引，或明确改用飞书顺序。
+- **事件与恢复**：应用可用[长连接或 Webhook](https://open.feishu.cn/document/server-docs/event-subscription-guide/overview)收事件。[群消息事件](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)记录人类、Bot 与点名；可申请收用户及其他 Bot 消息的 `im:message.group_msg.include_bot:read`，但不含本 Bot 自己发送的消息。以 `message_id` 去重，自己发的帖用发送响应登记；发送 `uuid` 的平台去重仅一小时。仍需保存必要的事件处理状态，并实测断线后用历史补齐，不把事件重试当作永久日志。只会推送的[自定义 Webhook 机器人](https://open.feishu.cn/document/client-docs/bot-v3/bot-overview)不能单独承担接收。
+- **一个 Bot 或每 Agent 一个 Bot**：一个应用 Bot 可以把多会话发言带署名发进群，部署简单；但飞书显示的原生作者都是这个 Bot，用户不能用原生 `@` 选中虚拟 Agent。原生点名和独立作者身份需要独立 Bot 账号；[官方 FAQ](https://open.feishu.cn/document/faq/bot)明确不支持用 OpenAPI 创建机器人，需预先配好应用和权限。因而不能把「随建房生成任意名字和原生 Bot 身份」当作平台现成能力。单 Bot 可用文本 `@显示名` 由桥接层识别，但需实测飞书客户端输入体验。
+- **必须自己做的部分**：项目、群、Agent 与 OpenCode 会话的映射；谁已把全文读进 Agent 上下文；忙时合并未读、普通 `queue` 与紧急 `steer`；房间共享额度、暂停、恢复、去重。[飞书的已读查询](https://open.feishu.cn/document/server-docs/im-v1/message/read_users)只返回已读用户，Bot 只能查自己七天内发的消息，不能拿来判断某个 OpenCode 会话是否已读。
+
+若首要目标是让同一飞书租户内的团队尽快试用，值得先用现有测试群、一个应用 Bot 和两个独立 OpenCode 会话验证。先只做飞书时间线，不复制聊天 UI；验证收发、点名解析、自发帖去重、断线补读和暂停后不再唤醒。若独立原生 Bot 名字和 `@` 是必需体验，再用两个预配置 Bot 对照。接入也意味着讨论正文会离开本机，应先确认租户权限、允许接入的群及代码或日志能否发送。这是待验证的产品选项，当前内置讨论室设计没有切换。
+
+## 科研：哪些案例有真实讨论？
+
+### 1. Station：让不同模型在公共论坛里长期接力
+
+2026 年 8 月的[数学预印本](https://arxiv.org/html/2608.23691v1)报告：不同模型家族的 agents 在共享环境里自主探索、公开交流中间结果、接手别人尝试过的方向。该版本没有中央指挥或固定求解流水线。作者在 12 道既有构造题和 2 个额外案例中，报告 5 题得到相对既有文献的新结果，并公开[系统源码](https://github.com/dualverse-ai/station)、讨论记录、证明及验证代码。这个结论适用于该论文的数学构造任务和作者的新颖性核查。
+
+2026 年 10 月[后续预印本](https://arxiv.org/abs/2610.08927)针对开放问题加入 Supervisor 和周期性 Meta Reflection，处理没明显进展指标时的停滞。不要把后一版的监督机制当作前一版已有功能。设计上最值得借鉴的是保存半成品、失败路径和证据，让晚到或刚恢复的 agent 可以接着做；论坛可供读取，不等同于帖子即时触发全员模型运行。
+
+[Station 论坛源码](https://github.com/dualverse-ai/station/blob/main/station/rooms/public_memory.py)区分新帖与回帖：新帖通知其他活跃成员；回帖只通知原帖作者、此前回复过的人以及本次被点名的人。两种都是写入待处理通知，由[会话循环](https://github.com/dualverse-ai/station/blob/main/station/station.py)在下一次 tick 将通知作为 `System Messages` 提供，并不会额外启动或打断 agent。
+
+### 2. Stellar Colosseum / Antigravity `/teamwork`：让反驳跟着提案走
+
+[Stellar Colosseum 预印本](https://arxiv.org/html/2609.15983)把独立生成、定向证伪和树状综合接起来。综合节点会同时读候选方案及其质疑，不会只看到一个“获胜结论”。这种机制有真实的跨 agent 反驳，但走的是结构化工作流，而非开放群聊。
+
+[Google Research 2026-11-13 报告](https://research.google/blog/advancing-science-engineering-with-antigravity-teamwork)称，研究团队用集成该方法的 Long Proof 流程证明了 Courtade–Kumar 猜想；同一发布还列出若干由研究者核验或用 Lean 形式化的成果。结论应归于这些工作流和验证链，不能归到另一个产品功能 `/swarm` 的共享留言板。
+
+### 3. 生物研究：结构化辩论和小组会议
+
+- **Google Co-Scientist**：[Nature，2026-05-19](https://www.nature.com/articles/s41586-026-10644-y)。系统用专职 agents 做生成、反思、排序、演化和复核；自我对弈式科学辩论与成对锦标赛是不同环节。论文报告了生物医学假设及部分外部实验验证；其中一个遗传机制案例是再现研究团队独立获得、当时尚未发表的发现。可借鉴的是“质疑推动修订”及外部验证，不是自由群聊或全员唤醒。
+- **Stanford Virtual Lab**：[公开编排仓库](https://github.com/zou-group/virtual-lab)与[斯坦福报道](https://med.stanford.edu/news/all-news/2025/07/virtual-scientist.html)。研究者提出议程，多名不同角色的 agent 在团队会议中讨论，项目负责人角色综合，另有一对一会议。适合借鉴议程、角色和讨论记录；按会议运行，不是常驻房间按消息唤醒。
+
+### 4. 边界案例：有突破报道，不一定有讨论证据
+
+[OpenAI 2026-10-26 的科研公告](https://openai.com/index/building-scientific-understanding-with-academic-communities/)公开了多项成果及部分证明材料。该公告不足以证实产生这些结果的 agents 如何互发消息，故不作为讨论机制证据。[Euler 预印本](https://arxiv.org/html/2610.19864)公开了更清晰的共享研究图、异议与失败记录、验证和恢复机制；它可作为结构化协作对照，不把共享数据结构等同于即时群聊。
+
+## 对 OpenChamber / OpenCode 的已核实接口
+
+- **OpenChamber**：[扩展 SDK](https://docs.openchamber.dev/sdk)支持全屏页面，并能通过 `contributes.opencodePlugin` 随扩展分发 OpenCode 插件。[Host API](https://docs.openchamber.dev/sdk/host)还支持扩展自有后台服务与会话事件（例如 `turn-finished`），无需打开 UI 才能接收。发布和运行的具体边界须按目标版本实测。
+- **OpenCode V2**：[服务端插件](https://opencode.ai/docs/build/plugins/server)可注册工具，[插件 RPC](https://opencode.ai/docs/build/plugins/rpc)可公开自定义方法和事件。[公开 API 规范](https://opencode.ai/docs/openapi.json)的 `session.prompt` 可接受 `delivery: "queue" | "steer"`：`queue` 在会话空闲时启动执行，忙碌时排到后续轮次，不抢占当前轮；`steer` 在活跃轮次的下一个可接收点送入。接口返回已接纳的 inbox 项，不代表 agent 已执行或已读。`resume: false` 只接纳，不安排执行。
+- **持久化边界**：OpenCode 原生事件流与插件 RPC 订阅是实时流，断线期间的事件不会重放。共用讨论记录、成员游标及失败补投机制，应与实时信号分开研究。还需用真实 V2 会话确认忙碌、空闲、等待权限和服务重启时的交付行为与可观测状态。
+
+## 设计访谈与验证线索
+
+- **从一次广播到持续讨论**：谁属于全员，是否包含发言者；逐消息投递与短窗合并怎样影响协作；非讨论性的状态更新是否写进同一日志。
+- **让质疑成为可追溯证据**：收集引用原发言、反例、验证结果和修订，不用“全员同意”代替事实核验。
+- **防止回复风暴**：允许显式沉默；区分讨论帖和工具流式输出；研究预算、暂停、取消及人类插话。全员投递不必逼出全员发言。
+- **度量讨论是否有效**：用同一任务、相近模型预算，对照多轮单 agent、并行独立后汇总、真正讨论三组。看测试/证明通过率、有用异议、因异议导致的改正，以及延迟与 token 成本。[ICML 比较研究](https://proceedings.mlr.press/v235/smit24a.html)发现多智能体辩论并不稳定胜过自一致性等基线。[2026 年 11 月的人机讨论预印本](https://arxiv.org/html/2611.14901v1)也提示，在它测试的回答验证和事实核查任务上，多轮互动是相对于单轮辅助的主要收益来源。如不设多轮单 agent 对照，很容易把多做几轮的收益误算给多人讨论。
