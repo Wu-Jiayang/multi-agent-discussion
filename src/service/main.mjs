@@ -66,7 +66,7 @@ function normalizeModels(models) {
   return (Array.isArray(models) ? models : []).map(model => ({
     providerID: model.providerID, id: model.id, name: model.name || model.id,
     providerName: model.providerName || model.provider?.name || model.providerID,
-    capabilities: model.capabilities || {},
+    capabilities: model.capabilities || {}, ...(model.variant ? { variant: model.variant } : {}),
   }));
 }
 
@@ -266,7 +266,12 @@ export function createDiscussionService(options = {}) {
 
   async function reqText(req) {
     let text = "";
-    for await (const chunk of req) text += chunk;
+    let size = 0;
+    for await (const chunk of req) {
+      size += chunk.length;
+      if (size > MAX_BODY) throw new RoomError("ROOM_REQUEST_TOO_LARGE", "Request body is too large.", {}, 413);
+      text += chunk;
+    }
     return text;
   }
 

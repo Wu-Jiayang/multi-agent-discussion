@@ -265,7 +265,7 @@ export class RoomStore {
       names.add(key);
       const model = spec.model;
       if (!model || typeof model.providerID !== "string" || typeof model.id !== "string") fail("ROOM_INVALID_INPUT", "Every agent needs a providerID and model id.");
-      return { id: id("m"), role, displayName, model: { providerID: model.providerID, id: model.id, name: model.name || model.id } };
+      return { id: id("m"), role, displayName, model: { providerID: model.providerID, id: model.id, name: model.name || model.id, ...(model.variant ? { variant: model.variant } : {}) } };
     });
     const roomId = id("r");
     const humanName = cleanText(input.humanName || "房主", "humanName", { maxChars: 80 });
@@ -734,7 +734,7 @@ export class RoomStore {
       const question = row.question_id ? this.question(roomId, row.question_id) : null;
       const item = {
         messageId: row.id, roomSeq: row.room_seq,
-        author: { memberId: author.memberId, displayName: author.display_name, kind: author.kind },
+        author: { memberId: author.memberId, displayName: author.displayName, kind: author.kind },
         isOwn: author.memberId === viewerId, kind: row.kind, createdAt: row.created_at,
         mentions: this.mentionedMembers(row.id), mentionAll: row.mention_all === 1,
         replyToMessageId: row.reply_to_id, questionId: row.question_id,
@@ -966,7 +966,7 @@ export class RoomStore {
       const room = this.room(reminder.room_id);
       const retryCharged = reminder.charged === 1 && reminder.refunded === 0;
       if (room.status !== "ready" && !(retryCharged && room.status === "paused" && room.paused_reason === "budget")) return null;
-      if (!["pending", "reserved", "unknown"].includes(reminder.status)) return null;
+      if (!["pending", "unknown"].includes(reminder.status)) return null;
       if (!reminder.unread_count) return null;
       if (!retryCharged) {
         if (room.budget_remaining <= 0) return null;
@@ -1013,10 +1013,6 @@ export class RoomStore {
     });
   }
 
-  retryUnknown(reminderId, now = new Date().toISOString()) {
-    this.db.prepare("UPDATE reminders SET status='reserved',updated_at=? WHERE id=? AND status='unknown'").run(now, reminderId);
-  }
-
   deferReminder(reminderId, reason, now = new Date().toISOString()) {
     return this.tx(() => {
       const reminder = this.db.prepare("SELECT * FROM reminders WHERE id=?").get(reminderId);
@@ -1051,10 +1047,12 @@ export class RoomStore {
   }
 
   dueReminders(roomId = null, limit = 20, now = new Date().toISOString()) {
-    const where = `(status IN ('pending','reserved','unknown') OR (status='submitting' AND lease_until<?)) AND (next_attempt_at IS NULL OR next_attempt_at<=?)`;
+    const where = `(r.status IN ('pending','reserved','unknown') OR (r.status='submitting' AND r.lease_until<?))
+      AND (r.next_attempt_at IS NULL OR r.next_attempt_at<=?)
+      AND (rm.status='ready' OR (rm.status='paused' AND rm.paused_reason='budget' AND r.charged=1 AND r.refunded=0))`;
     const rows = roomId
-      ? this.db.prepare(`SELECT * FROM reminders WHERE room_id=? AND ${where} ORDER BY CASE kind WHEN 'steer' THEN 0 ELSE 1 END,created_at LIMIT ?`).all(roomId, now, now, limit)
-      : this.db.prepare(`SELECT * FROM reminders WHERE ${where} ORDER BY CASE kind WHEN 'steer' THEN 0 ELSE 1 END,created_at LIMIT ?`).all(now, now, limit);
+      ? this.db.prepare(`SELECT r.* FROM reminders r JOIN rooms rm ON rm.id=r.room_id WHERE r.room_id=? AND ${where} ORDER BY CASE r.kind WHEN 'steer' THEN 0 ELSE 1 END,r.created_at LIMIT ?`).all(roomId, now, now, limit)
+      : this.db.prepare(`SELECT r.* FROM reminders r JOIN rooms rm ON rm.id=r.room_id WHERE ${where} ORDER BY CASE r.kind WHEN 'steer' THEN 0 ELSE 1 END,r.created_at LIMIT ?`).all(now, now, limit);
     return rows.map(row => ({ ...row, room: this.room(row.room_id), member: this.member(row.member_id) }));
   }
 
@@ -1134,9 +1132,9 @@ export class RoomStore {
     if (room.status === "ended") return this.roomSummary(room);
     return this.tx(() => {
       this.db.prepare("UPDATE rooms SET status='ended',ended_at=?,paused_reason='ended' WHERE id=?").run(now, roomId);
-      const reserved = this.db.prepare("SELECT * FROM reminders WHERE room_id=? AND status='reserved'").all(roomId);
-      for (const reminder of reserved) this.refundReminderInTx(reminder, now);
-      this.db.prepare("UPDATE reminders SET status='cancelled',updated_at=? WHERE room_id=? AND status IN ('pending','reserved')").run(now, roomId);
+      const active = this.db.prepare("SELECT * FROM reminders WHERE room_id=? AND status IN ('pending','reserved','unknown','submitting')").all(roomId);
+      for (const reminder of active) if (reminder.status === "reserved") this.refundReminderInTx(reminder, now);
+      this.db.prepare("UPDATE reminders SET status='cancelled',updated_at=?,next_attempt_at=NULL WHERE room_id=? AND status IN ('pending','reserved','unknown','submitting')").run(now, roomId);
       this.configEvent(roomId, "room-ended", { status: room.status }, { status: "ended" });
       return this.roomSummary(this.room(roomId));
     });

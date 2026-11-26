@@ -2087,6 +2087,14 @@ ${GUEST_UI_LOOK_CSS}`;
       if (signature === JSON.stringify(state.models)) return;
       state.models = catalog.models;
       if (!state.createAgents.length) resetCreateAgents();
+      else {
+        const available = new Set(state.models.map(modelKey));
+        const missing = state.createAgents.some((row) => row.modelKey && !available.has(row.modelKey));
+        if (missing) {
+          for (const row of state.createAgents) if (!available.has(row.modelKey)) row.modelKey = "";
+          showError(new Error("\u6A21\u578B\u76EE\u5F55\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9\u53D7\u5F71\u54CD\u7684\u6210\u5458\u6A21\u578B\u3002"));
+        }
+      }
       if (state.creating) renderCreate();
     } catch (error) {
       showError(error);
@@ -2113,9 +2121,12 @@ ${GUEST_UI_LOOK_CSS}`;
     for (let suffix = 2; rows.some((row, rowIndex) => rowIndex !== index && row.displayName === name); suffix += 1) name = `${base} ${suffix}`;
     return name;
   }
+  function modelKey(model) {
+    return model ? JSON.stringify([model.providerID, model.id]) : "";
+  }
   function modelOptions(selected) {
     const providers = [...new Set(state.models.map((model) => model.providerID))];
-    return providers.map((provider) => `<optgroup label="${escape(provider)}">${state.models.filter((model) => model.providerID === provider).map((model) => `<option value="${state.models.indexOf(model)}" ${selected === state.models.indexOf(model) ? "selected" : ""}>${escape(model.name)}</option>`).join("")}</optgroup>`).join("");
+    return `<option value="" ${selected ? "" : "selected"}>\u8BF7\u9009\u62E9\u6A21\u578B</option>` + providers.map((provider) => `<optgroup label="${escape(provider)}">${state.models.filter((model) => model.providerID === provider).map((model) => `<option value="${escape(modelKey(model))}" ${selected === modelKey(model) ? "selected" : ""}>${escape(model.name)}${model.variant ? ` (${escape(model.variant)})` : ""}</option>`).join("")}</optgroup>`).join("");
   }
   function renderCreate() {
     const preset = state.createPreset || "generic";
@@ -2134,19 +2145,19 @@ ${GUEST_UI_LOOK_CSS}`;
         <div class="agent-fields">
           <div class="field"><label>\u663E\u793A\u540D</label><input data-field="displayName" value="${escape(row.displayName)}" maxlength="80"></div>
           <div class="field"><label>\u89D2\u8272</label><select data-field="role">${Object.entries(roleLabels).map(([value, label]) => `<option value="${value}" ${row.role === value ? "selected" : ""}>${label}</option>`).join("")}</select></div>
-          <div class="field"><label>\u6A21\u578B</label><select data-field="model">${state.models.length ? modelOptions(row.modelIndex) : `<option>\u6B63\u5728\u8BFB\u53D6\u53EF\u7528\u6A21\u578B\u2026</option>`}</select></div>
+          <div class="field"><label>\u6A21\u578B</label><select data-field="model">${state.models.length ? modelOptions(row.modelKey) : `<option>\u6B63\u5728\u8BFB\u53D6\u53EF\u7528\u6A21\u578B\u2026</option>`}</select></div>
         </div>
       </div>`).join("")}</div>
     <button class="button secondary" data-action="add-agent">\u6DFB\u52A0\u6210\u5458</button>
     <div class="warning">\u65B0\u4F1A\u8BDD\u4F7F\u7528\u5F53\u524D\u9879\u76EE\u5DE5\u4F5C\u533A\uFF0C\u9ED8\u8BA4\u5B8C\u5168\u6267\u884C\u6743\u9650\uFF0C\u5E76\u5728\u4F1A\u8BDD\u7EA7\u7981\u7528\u539F\u751F\u63D0\u95EE\u5DE5\u5177\u3002\u591A\u4E2A Agent \u540C\u65F6\u5199\u540C\u4E00\u5DE5\u4F5C\u533A\u53EF\u80FD\u4E92\u76F8\u8986\u76D6\u6587\u4EF6\uFF1B\u8BA8\u8BBA\u6587\u6863\u8BF7\u5199\u623F\u95F4\u4E34\u65F6\u76EE\u5F55\u3002\u4E0D\u4F1A\u4FEE\u6539\u5168\u5C40\u6743\u9650\uFF0C\u4E0D\u521B\u5EFA worktree\u3002</div>
-    <div class="create-actions"><button class="button primary" data-action="create-room" ${!state.models.length || !state.directory ? "disabled" : ""}>\u521B\u5EFA\u623F\u95F4</button><button class="button secondary" data-action="cancel-create">\u53D6\u6D88</button></div>
+    <div class="create-actions"><button class="button primary" data-action="create-room" ${!state.models.length || !state.directory || state.createAgents.some((row) => !row.modelKey) ? "disabled" : ""}>\u521B\u5EFA\u623F\u95F4</button><button class="button secondary" data-action="cancel-create">\u53D6\u6D88</button></div>
     ${!state.directory ? `<p class="intro">\u8BF7\u5148\u5728 OpenChamber \u6253\u5F00\u4E00\u4E2A\u9879\u76EE\u3002</p>` : ""}
   `;
   }
   function resetCreateAgents() {
     state.createPreset = "generic";
     state.createTitle = "\u65B0\u7684\u8BA8\u8BBA\u5BA4";
-    state.createAgents = [0, 1].map((index) => ({ role: "generic", displayName: `Agent ${index + 1}`, modelIndex: Math.min(index, Math.max(0, state.models.length - 1)), autoName: true }));
+    state.createAgents = [0, 1].map((index) => ({ role: "generic", displayName: `Agent ${index + 1}`, modelKey: modelKey(state.models[Math.min(index, Math.max(0, state.models.length - 1))]), autoName: true }));
   }
   async function loadRooms(preferred) {
     const data = await request("GET", "/rooms", null, { projectDir: state.directory });
@@ -2513,7 +2524,7 @@ ${GUEST_UI_LOOK_CSS}`;
     }
     if (action === "add-agent" && state.createAgents.length < 8) {
       const index = state.createAgents.length;
-      state.createAgents.push({ role: "generic", displayName: "", modelIndex: 0, autoName: true });
+      state.createAgents.push({ role: "generic", displayName: "", modelKey: modelKey(state.models[0]), autoName: true });
       state.createAgents[index].displayName = defaultName("generic", index, state.createAgents);
       renderCreate();
       return;
@@ -2526,7 +2537,11 @@ ${GUEST_UI_LOOK_CSS}`;
     if (action === "create-room") {
       try {
         clearError();
-        const members = state.createAgents.map((row, index) => ({ role: row.role, displayName: row.displayName.trim(), model: state.models[row.modelIndex] }));
+        const members = state.createAgents.map((row) => {
+          const model = state.models.find((item) => modelKey(item) === row.modelKey);
+          if (!model) throw new Error("\u8BF7\u4E3A\u6BCF\u4E2A\u6210\u5458\u9009\u62E9\u6709\u6548\u6A21\u578B\u3002");
+          return { role: row.role, displayName: row.displayName.trim(), model };
+        });
         const room = await request("POST", "/rooms", { projectDir: state.directory, title: $("#create-title").value, preset: $("#create-preset").value, humanName: $("#create-human").value, members });
         state.creating = false;
         await loadRooms(room.roomId);
@@ -2536,27 +2551,16 @@ ${GUEST_UI_LOOK_CSS}`;
       }
       return;
     }
-    if (action === "pause") {
-      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/pause`);
-      await refreshRoom();
-      return;
-    }
-    if (action === "resume") {
-      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/resume`, { budgetLimit: 50 });
-      await refreshRoom();
-      void loadTimeline(true);
-      return;
-    }
-    if (action === "retry") {
-      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/retry`);
-      await refreshRoom();
-      return;
-    }
-    if (action === "end") {
-      if (!confirm("\u7ED3\u675F\u623F\u95F4\uFF1F\u4F1A\u505C\u6B62\u540E\u7EED\u81EA\u52A8\u5524\u9192\u5E76\u79FB\u9664\u672C\u6269\u5C55\u6DFB\u52A0\u7684\u4F1A\u8BDD\u6307\u4EE4\uFF0C\u4F46\u4FDD\u7559\u8BA8\u8BBA\u8BB0\u5F55\u548C\u4F1A\u8BDD\u3002")) return;
-      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/end`);
-      await refreshRoom();
-      renderComposer();
+    if (action === "pause" || action === "resume" || action === "retry" || action === "end") {
+      try {
+        if (action === "end" && !confirm("\u7ED3\u675F\u623F\u95F4\uFF1F\u4F1A\u505C\u6B62\u540E\u7EED\u81EA\u52A8\u5524\u9192\u5E76\u79FB\u9664\u672C\u6269\u5C55\u6DFB\u52A0\u7684\u4F1A\u8BDD\u6307\u4EE4\uFF0C\u4F46\u4FDD\u7559\u8BA8\u8BBA\u8BB0\u5F55\u548C\u4F1A\u8BDD\u3002")) return;
+        await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/${action}`, action === "resume" ? { budgetLimit: state.room?.budget.limit || 50 } : void 0);
+        await refreshRoom();
+        if (action === "resume") await loadTimeline(true);
+        if (action === "end") renderComposer();
+      } catch (error) {
+        showError(error);
+      }
       return;
     }
     if (action === "open-session") {
@@ -2667,7 +2671,7 @@ ${GUEST_UI_LOOK_CSS}`;
           item.displayName = defaultName(item.role, index, state.createAgents);
           item.autoName = true;
         }
-      } else if (field2 === "model") item.modelIndex = Number(target.value);
+      } else if (field2 === "model") item.modelKey = target.value;
       else {
         item.displayName = target.value;
         item.autoName = false;

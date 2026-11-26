@@ -270,6 +270,7 @@ test("history search is preview-only, cursors bind filters, context opens full t
   const search = store.history(roomId, { query: "关键词", viewerMemberId: members[0].id });
   assert.equal(search.items.length, 1);
   assert.equal(search.items[0].messageId, old.messageId);
+  assert.equal(search.items[0].author.displayName, "Agent 2");
   assert.equal(search.items[0].preview, true);
   assert.equal(store.hasRead(members[0].id, old.messageId), false);
   assert.equal(store.history(roomId, { query: "[", viewerMemberId: members[0].id }).items.length, 0);
@@ -356,6 +357,62 @@ test("busy mention uses steer, ordinary waits, and round-end reminders repeat wi
   assert.equal(store.room(roomId).budget_remaining, 0);
   assert.equal(store.room(roomId).status, "paused");
   assert.equal(store.room(roomId).paused_reason, "budget");
+});
+
+test("ended and paused rooms do not occupy the global dispatch queue", async () => {
+  const { store, engine, roomId, members } = setup({ memberCount: 2 });
+  engine.post(roomId, source(members[0]), { text: "排队" });
+  await engine.flush();
+  assert.equal(store.dueReminders(roomId).length, 1);
+  engine.pause(roomId);
+  assert.equal(store.dueReminders(null).length, 0);
+  engine.resume(roomId, 50);
+  const job = await engine.dispatchNext();
+  await engine.jobResult(job, { outcome: "unknown", error: "lost" });
+  engine.end(roomId);
+  assert.equal(store.dueReminders(null).length, 0);
+});
+
+test("a reminder can only be reserved once", async () => {
+  const { store, engine, roomId, members } = setup({ memberCount: 2 });
+  engine.post(roomId, source(members[0]), { text: "单次预留" });
+  await engine.flush();
+  const reminder = store.dueReminders(roomId)[0];
+  assert.ok(store.reserveReminder(reminder.id));
+  assert.equal(store.reserveReminder(reminder.id), null);
+  assert.equal(store.room(roomId).budget_remaining, 49);
+});
+
+test("dispatch recovers an expired submitting lease without a separate scan", async () => {
+  const { store, engine, roomId, members } = setup({ memberCount: 2 });
+  engine.post(roomId, source(members[0]), { text: "租约" });
+  await engine.flush();
+  const first = await engine.dispatchNext();
+  store.db.prepare("UPDATE reminders SET lease_until='2000-01-01T00:00:00.000Z' WHERE id=?").run(first.jobId);
+  const retry = await engine.dispatchNext();
+  assert.equal(retry.jobId, first.jobId);
+  assert.equal(store.room(roomId).budget_remaining, 49);
+});
+
+test("model variants survive room creation", async () => {
+  const root = scratch();
+  const store = new RoomStore();
+  const engine = new RoomEngine(store);
+  engine.createRoom({ projectDir: root, tempRoot: root, members: [
+    { role: "generic", model: { providerID: "p", id: "a", variant: "high" } },
+    { role: "generic", model: { providerID: "p", id: "b" } },
+  ] });
+  assert.equal(engine.nextJob().model.variant, "high");
+});
+
+test("instruction refresh failures on ready members are visible and back off", async () => {
+  const { store, engine, roomId, members } = setup({ memberCount: 2 });
+  engine.rename(roomId, members[0].id, "新名字");
+  const job = engine.nextJob();
+  assert.equal(job.type, "put-instructions");
+  await engine.jobResult(job, { outcome: "failed", error: "temporary instruction error" });
+  assert.match(store.member(job.memberId).task_error, /temporary instruction error/);
+  assert.ok(store.member(job.memberId).next_attempt_at);
 });
 
 test("unknown submission retries the same input ID and charges once", async () => {
@@ -477,7 +534,8 @@ test("pause keeps posts and questions usable, resume starts a fresh budget and r
   engine.pause(roomId);
   engine.post(roomId, source(members[0]), { text: "暂停也发帖", mentionMemberIds: [members[1].id] });
   assert.equal(store.unreadSummary(roomId, members[1].id, []).unreadCount, 1);
-  assert.equal(store.dueReminders(roomId).filter(row => row.kind === "steer").length, 1);
+  assert.equal(store.dueReminders(roomId).filter(row => row.kind === "steer").length, 0);
+  assert.equal(store.reminders(roomId).filter(row => row.kind === "steer").length, 1);
   assert.equal(await engine.dispatchNext(), null);
   const asked = engine.ask(roomId, source(members[0]), { text: "暂停也能问" });
   engine.answer(roomId, asked.questionId, { answer: "可以" });

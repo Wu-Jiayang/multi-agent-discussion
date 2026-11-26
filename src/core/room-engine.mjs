@@ -370,6 +370,7 @@ export class RoomEngine {
   async dispatchNext() {
     const creation = this.nextJob();
     if (creation) return creation;
+    this.store.recoverExpiredReminders(this.now());
     const deadline = Date.now() + 8000;
     for (const candidate of this.store.dueReminders(null, 100, this.now())) {
       if (Date.now() >= deadline) break;
@@ -392,7 +393,6 @@ export class RoomEngine {
       }
       reminder = this.store.refreshReminder(reminder.id, this.now());
       if (!reminder?.unread_count) { this.store.cancelReminder(candidate.id, "Messages were read before dispatch"); continue; }
-      if (reminder.status === "submitting") this.store.retryUnknown(reminder.id, this.now());
       const reserved = this.store.reserveReminder(reminder.id, this.now());
       if (!reserved) continue;
       this.store.markSubmitting(reminder.id, this.now());
@@ -418,7 +418,7 @@ export class RoomEngine {
       else this.store.sessionFailed(job.roomId, job.memberId, result.error || "Session creation failed");
     } else if (job.type === "put-instructions") {
       if (outcome === "accepted") this.store.instructionsAdded(job.roomId, job.memberId);
-      else if (this.store.member(job.memberId).creation_status !== "ready") this.store.taskFailed(job.roomId, job.memberId, result.error || "Instruction update failed", this.now());
+      else if (!this.store.member(job.memberId).instructions_added) this.store.taskFailed(job.roomId, job.memberId, result.error || "Instruction update failed", this.now());
     } else if (job.type === "remove-instructions") {
       if (outcome === "accepted") this.store.instructionsRemoved(job.roomId, job.memberId);
       else if (this.store.member(job.memberId).instructions_added) this.store.taskFailed(job.roomId, job.memberId, result.error || "Instruction removal failed", this.now());

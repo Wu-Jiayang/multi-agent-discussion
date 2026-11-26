@@ -68,6 +68,14 @@ async function refreshModels(force = false) {
     if (signature === JSON.stringify(state.models)) return;
     state.models = catalog.models;
     if (!state.createAgents.length) resetCreateAgents();
+    else {
+      const available = new Set(state.models.map(modelKey));
+      const missing = state.createAgents.some(row => row.modelKey && !available.has(row.modelKey));
+      if (missing) {
+        for (const row of state.createAgents) if (!available.has(row.modelKey)) row.modelKey = "";
+        showError(new Error("模型目录已变化，请重新选择受影响的成员模型。"));
+      }
+    }
     if (state.creating) renderCreate();
   } catch (error) { showError(error); }
 }
@@ -92,9 +100,10 @@ function defaultName(role, index, rows) {
   for (let suffix = 2; rows.some((row, rowIndex) => rowIndex !== index && row.displayName === name); suffix += 1) name = `${base} ${suffix}`;
   return name;
 }
+function modelKey(model) { return model ? JSON.stringify([model.providerID, model.id]) : ""; }
 function modelOptions(selected) {
   const providers = [...new Set(state.models.map(model => model.providerID))];
-  return providers.map(provider => `<optgroup label="${escape(provider)}">${state.models.filter(model => model.providerID === provider).map(model => `<option value="${state.models.indexOf(model)}" ${selected === state.models.indexOf(model) ? "selected" : ""}>${escape(model.name)}</option>`).join("")}</optgroup>`).join("");
+  return `<option value="" ${selected ? "" : "selected"}>请选择模型</option>` + providers.map(provider => `<optgroup label="${escape(provider)}">${state.models.filter(model => model.providerID === provider).map(model => `<option value="${escape(modelKey(model))}" ${selected === modelKey(model) ? "selected" : ""}>${escape(model.name)}${model.variant ? ` (${escape(model.variant)})` : ""}</option>`).join("")}</optgroup>`).join("");
 }
 function renderCreate() {
   const preset = state.createPreset || "generic";
@@ -113,19 +122,19 @@ function renderCreate() {
         <div class="agent-fields">
           <div class="field"><label>显示名</label><input data-field="displayName" value="${escape(row.displayName)}" maxlength="80"></div>
           <div class="field"><label>角色</label><select data-field="role">${Object.entries(roleLabels).map(([value, label]) => `<option value="${value}" ${row.role === value ? "selected" : ""}>${label}</option>`).join("")}</select></div>
-          <div class="field"><label>模型</label><select data-field="model">${state.models.length ? modelOptions(row.modelIndex) : `<option>正在读取可用模型…</option>`}</select></div>
+          <div class="field"><label>模型</label><select data-field="model">${state.models.length ? modelOptions(row.modelKey) : `<option>正在读取可用模型…</option>`}</select></div>
         </div>
       </div>`).join("")}</div>
     <button class="button secondary" data-action="add-agent">添加成员</button>
     <div class="warning">新会话使用当前项目工作区，默认完全执行权限，并在会话级禁用原生提问工具。多个 Agent 同时写同一工作区可能互相覆盖文件；讨论文档请写房间临时目录。不会修改全局权限，不创建 worktree。</div>
-    <div class="create-actions"><button class="button primary" data-action="create-room" ${!state.models.length || !state.directory ? "disabled" : ""}>创建房间</button><button class="button secondary" data-action="cancel-create">取消</button></div>
+    <div class="create-actions"><button class="button primary" data-action="create-room" ${!state.models.length || !state.directory || state.createAgents.some(row => !row.modelKey) ? "disabled" : ""}>创建房间</button><button class="button secondary" data-action="cancel-create">取消</button></div>
     ${!state.directory ? `<p class="intro">请先在 OpenChamber 打开一个项目。</p>` : ""}
   `;
 }
 function resetCreateAgents() {
   state.createPreset = "generic";
   state.createTitle = "新的讨论室";
-  state.createAgents = [0, 1].map(index => ({ role: "generic", displayName: `Agent ${index + 1}`, modelIndex: Math.min(index, Math.max(0, state.models.length - 1)), autoName: true }));
+  state.createAgents = [0, 1].map(index => ({ role: "generic", displayName: `Agent ${index + 1}`, modelKey: modelKey(state.models[Math.min(index, Math.max(0, state.models.length - 1))]), autoName: true }));
 }
 
 async function loadRooms(preferred) {
@@ -452,7 +461,7 @@ app.addEventListener("click", async event => {
   if (action === "cancel-create") { if (state.rooms[0]) { hideCreate(); await selectRoom(state.rooms[0].roomId); } else showCreate(); return; }
   if (action === "add-agent" && state.createAgents.length < 8) {
     const index = state.createAgents.length;
-    state.createAgents.push({ role: "generic", displayName: "", modelIndex: 0, autoName: true });
+    state.createAgents.push({ role: "generic", displayName: "", modelKey: modelKey(state.models[0]), autoName: true });
     state.createAgents[index].displayName = defaultName("generic", index, state.createAgents);
     renderCreate(); return;
   }
@@ -460,7 +469,11 @@ app.addEventListener("click", async event => {
   if (action === "create-room") {
     try {
       clearError();
-      const members = state.createAgents.map((row, index) => ({ role: row.role, displayName: row.displayName.trim(), model: state.models[row.modelIndex] }));
+      const members = state.createAgents.map(row => {
+        const model = state.models.find(item => modelKey(item) === row.modelKey);
+        if (!model) throw new Error("请为每个成员选择有效模型。");
+        return { role: row.role, displayName: row.displayName.trim(), model };
+      });
       const room = await request("POST", "/rooms", { projectDir: state.directory, title: $("#create-title").value, preset: $("#create-preset").value, humanName: $("#create-human").value, members });
       state.creating = false;
       await loadRooms(room.roomId);
@@ -468,12 +481,15 @@ app.addEventListener("click", async event => {
     } catch (error) { showError(error); }
     return;
   }
-  if (action === "pause") { await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/pause`); await refreshRoom(); return; }
-  if (action === "resume") { await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/resume`, { budgetLimit: 50 }); await refreshRoom(); void loadTimeline(true); return; }
-  if (action === "retry") { await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/retry`); await refreshRoom(); return; }
-  if (action === "end") {
-    if (!confirm("结束房间？会停止后续自动唤醒并移除本扩展添加的会话指令，但保留讨论记录和会话。")) return;
-    await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/end`); await refreshRoom(); renderComposer(); return;
+  if (action === "pause" || action === "resume" || action === "retry" || action === "end") {
+    try {
+      if (action === "end" && !confirm("结束房间？会停止后续自动唤醒并移除本扩展添加的会话指令，但保留讨论记录和会话。")) return;
+      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/${action}`, action === "resume" ? { budgetLimit: state.room?.budget.limit || 50 } : undefined);
+      await refreshRoom();
+      if (action === "resume") await loadTimeline(true);
+      if (action === "end") renderComposer();
+    } catch (error) { showError(error); }
+    return;
   }
   if (action === "open-session") { persistView(); await host.openSession(button.dataset.session); return; }
   if (action === "reply") {
@@ -523,7 +539,7 @@ app.addEventListener("change", async event => {
       const oldDefault = defaultName(item.role, index, state.createAgents);
       item.role = target.value;
       if (item.autoName || !item.displayName || item.displayName === oldDefault) { item.displayName = defaultName(item.role, index, state.createAgents); item.autoName = true; }
-    } else if (field === "model") item.modelIndex = Number(target.value);
+    } else if (field === "model") item.modelKey = target.value;
     else { item.displayName = target.value; item.autoName = false; }
     if (field !== "displayName") renderCreate();
     return;
