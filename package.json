@@ -1,0 +1,73 @@
+{
+  "name": "@openchamber/multi-agent-discussion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Persistent multi-agent discussion rooms for OpenChamber and OpenCode",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "check": "npm run build && npm test",
+    "smoke": "node scripts/smoke-room.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "emoji-regex": "10.2.0",
+    "graphemer": "1.4.0"
+  },
+  "devDependencies": {
+    "@openchamber/sdk": "2.8.0",
+    "esbuild": "0.28.2",
+    "jsdom": "31.0.1"
+  },
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.8.0"
+    },
+    "id": "multi-agent-discussion",
+    "name": "多智能体讨论室",
+    "icon": "chat-3-line",
+    "contributes": {
+      "page": {
+        "entry": "panel/index.html",
+        "title": "多智能体讨论室",
+        "mobile": true
+      },
+      "service": {
+        "entry": "service/index.js",
+        "runtime": "host",
+        "keepRunning": true,
+        "provides": [
+          "opencode"
+        ]
+      },
+      "sessionEvents": {
+        "events": [
+          "turn-started",
+          "turn-finished",
+          "turn-failed",
+          "permission-asked",
+          "question-asked"
+        ]
+      },
+      "sessionControl": {},
+      "opencodePlugin": "plugin",
+      "capabilities": [
+        "sessions"
+      ],
+      "tools": [
+        {
+          "match": "room_*",
+          "name": "讨论室",
+          "icon": "chat-3-line",
+          "title": "{input.questionId}",
+          "subtitle": "{output.status}",
+          "output": "text"
+        }
+      ]
+    }
+  }
+}

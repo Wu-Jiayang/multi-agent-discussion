@@ -1,0 +1,149 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
+import { join } from "node:path";
+import { once } from "node:events";
+import { createDiscussionService } from "../src/service/main.mjs";
+
+async function fixture() {
+  const root = mkdtempSync(join("/tmp/opencode", "room-service-test-"));
+  const active = createServer((req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ data: {} })); });
+  active.listen(0, "127.0.0.1");
+  await once(active, "listening");
+  const serviceToken = "host-secret";
+  const pluginToken = "plugin-secret";
+  const serviceHost = { sessions: { status: async () => ({ status: "idle" }) }, emit: async () => {} };
+  const service = createDiscussionService({
+    serviceToken, pluginToken, tempRoot: root,
+    opencodeURL: `http://127.0.0.1:${active.address().port}`,
+    serviceHost,
+  });
+  service.server.listen(0, "127.0.0.1");
+  await once(service.server, "listening");
+  const base = `http://127.0.0.1:${service.server.address().port}`;
+  async function call(method, path, body, plugin = false) {
+    const response = await fetch(base + path, { method, headers: { authorization: `Bearer ${plugin ? pluginToken : serviceToken}`, "content-type": "application/json" }, body: body == null ? undefined : JSON.stringify(body) });
+    const text = await response.text();
+    return { status: response.status, data: text ? JSON.parse(text) : null };
+  }
+  async function drainJobs() {
+    const jobs = [];
+    for (let guard = 0; guard < 30; guard += 1) {
+      const response = await call("GET", "/plugin/work", null, true);
+      const job = response.data;
+      if (!job?.type) break;
+      jobs.push(job);
+      const result = job.type === "create-session" ? { outcome: "accepted", sessionId: job.sessionId } : { outcome: "accepted" };
+      await call("POST", "/plugin/result", { job, result }, true);
+    }
+    return jobs;
+  }
+  return { root, active, service, serviceHost, call, drainJobs, close: async () => {
+    service.store.close();
+    await new Promise(resolveClose => service.server.close(resolveClose));
+    await new Promise(resolveClose => active.close(resolveClose));
+    rmSync(root, { recursive: true, force: true });
+  } };
+}
+
+test("model catalog survives service restart", async () => {
+  const root = mkdtempSync(join("/tmp/opencode", "room-catalog-test-"));
+  const filename = join(root, "rooms.sqlite");
+  const options = { database: filename, serviceToken: "host", pluginToken: "plugin", tempRoot: root };
+  let service = createDiscussionService(options);
+  service.server.listen(0, "127.0.0.1");
+  await once(service.server, "listening");
+  let base = `http://127.0.0.1:${service.server.address().port}`;
+  await fetch(base + "/plugin/catalog", { method: "POST", headers: { authorization: "Bearer plugin", "content-type": "application/json" }, body: JSON.stringify({ directory: root, models: [{ providerID: "probe", id: "persisted", name: "Persisted" }] }) });
+  service.store.close();
+  await new Promise(resolveClose => service.server.close(resolveClose));
+  service = createDiscussionService(options);
+  service.server.listen(0, "127.0.0.1");
+  await once(service.server, "listening");
+  base = `http://127.0.0.1:${service.server.address().port}`;
+  const response = await fetch(base + `/models?directory=${encodeURIComponent(root)}`, { headers: { authorization: "Bearer host" } });
+  const data = await response.json();
+  assert.equal(data.models[0].id, "persisted");
+  service.store.close();
+  await new Promise(resolveClose => service.server.close(resolveClose));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("HTTP service authenticates host/plugin separately and creates rooms without model calls", async () => {
+  const f = await fixture();
+  try {
+    const unauthenticated = await fetch(`http://127.0.0.1:${f.service.server.address().port}/health`);
+    assert.equal(unauthenticated.status, 401);
+    assert.equal(typeof (await f.call("GET", "/meta")).data.humanName, "string");
+    assert.equal((await f.call("GET", "/plugin/work", null, true)).status, 200);
+    assert.equal((await f.call("GET", "/rooms", null, true)).status, 404);
+    await f.call("POST", "/plugin/catalog", { models: [{ providerID: "probe", id: "fake", name: "Fake" }] }, true);
+    assert.equal((await f.call("GET", "/models")).data.models.length, 1);
+    await f.call("POST", "/plugin/catalog", { models: [{ providerID: "other", id: "x" }], directory: "/other" }, true);
+    assert.equal((await f.call("GET", "/models")).data.models[0].providerID, "other");
+    assert.deepEqual((await f.call("GET", "/models?directory=%2Fmissing")).data.models, []);
+    const created = (await f.call("POST", "/rooms", { projectDir: f.root, title: "HTTP 房间", members: [
+      { role: "generic", model: { providerID: "probe", id: "fake" } },
+      { role: "reviewer", model: { providerID: "probe", id: "fake" } },
+    ] })).data;
+    const jobs = await f.drainJobs();
+    assert.equal(jobs.filter(job => job.type === "create-session").length, 2);
+    assert.equal(jobs.filter(job => job.type === "put-instructions").length, 2);
+    assert.equal(jobs.some(job => job.type === "submit-reminder"), false);
+    const room = (await f.call("GET", `/rooms/${created.roomId}`)).data;
+    assert.equal(room.status, "ready");
+    assert.equal(room.members.length, 2);
+    assert.ok(room.members.every(member => member.sessionStatus === "idle"));
+  } finally { await f.close(); }
+});
+
+test("plugin tools, presentation receipts, questions and safe workspace previews work over HTTP", async () => {
+  const f = await fixture();
+  try {
+    const created = (await f.call("POST", "/rooms", { projectDir: f.root, title: "工具房间", members: [
+      { role: "generic", model: { providerID: "probe", id: "fake" } },
+      { role: "generic", model: { providerID: "probe", id: "fake" } },
+    ] })).data;
+    await f.drainJobs();
+    const room = (await f.call("GET", `/rooms/${created.roomId}`)).data;
+    const [a, b] = room.members;
+    f.serviceHost.sessions.status = async () => ({ status: "waiting" });
+    f.service.engine.hostEvent({ type: "question-asked", session: { id: a.sessionId } });
+    assert.equal((await f.call("GET", `/rooms/${created.roomId}`)).data.members.find(member => member.memberId === a.memberId).sessionStatus, "waiting-question");
+    f.serviceHost.sessions.status = async () => ({ status: "idle" });
+    f.service.engine.hostEvent({ type: "turn-started", session: { id: a.sessionId } });
+    const posted = (await f.call("POST", `/rooms/${created.roomId}/messages`, { text: "人类消息" })).data;
+    await f.service.engine.flush();
+    const reminders = await f.drainJobs();
+    assert.equal(reminders.filter(job => job.type === "submit-reminder").length, 2, JSON.stringify({room:await f.call("GET", `/rooms/${created.roomId}`),diagnostics:await f.call("GET", `/rooms/${created.roomId}/diagnostics`)}));
+    const unread = (await f.call("POST", "/plugin/tool", { sessionID: a.sessionId, name: "room_unread", input: {} }, true)).data;
+    assert.equal(unread.items[0].messageId, posted.messageId);
+    assert.equal((await f.call("GET", `/rooms/${created.roomId}/messages/${posted.messageId}/receipts`)).data.agents.length, 0);
+    assert.equal((await f.call("GET", "/plugin/presentations", null, true)).data.items.length, 0);
+    await f.call("POST", "/plugin/observe", { presentationId: unread.presentation.presentationId, sessionID: a.sessionId }, true);
+    assert.equal((await f.call("GET", "/plugin/presentations", null, true)).data.items.length, 1);
+    await f.call("POST", "/plugin/present", { presentationId: unread.presentation.presentationId, sessionID: a.sessionId }, true);
+    assert.equal((await f.call("GET", `/rooms/${created.roomId}/messages/${posted.messageId}/receipts`)).data.agents.length, 1);
+    const asked = (await f.call("POST", "/plugin/tool", { sessionID: a.sessionId, name: "room_ask", input: { text: "选哪个？", options: ["甲", "乙"] } }, true)).data;
+    assert.equal(asked.status, "stored");
+    await f.call("POST", `/rooms/${created.roomId}/questions/${asked.questionId}/answer`, { answer: "甲", note: "理由" });
+    const answered = (await f.call("GET", `/rooms/${created.roomId}/questions?status=answered`)).data.items[0];
+    assert.ok(answered.answerMessageId);
+    assert.notEqual(answered.answerMessageId, asked.messageId);
+    const tooLong = await f.call("POST", "/plugin/tool", { sessionID: a.sessionId, name: "room_post", input: { text: "界".repeat(51) } }, true);
+    assert.equal(tooLong.status, 422);
+    assert.equal(tooLong.data.error.code, "ROOM_MESSAGE_TOO_LONG");
+
+    const workspace = (await f.call("GET", `/rooms/${created.roomId}`)).data.workspaceDir;
+    writeFileSync(join(workspace, "note.md"), "# 讨论文档\n内容");
+    const preview = await f.call("POST", "/workspace/read", { roomId: created.roomId, path: join(workspace, "note.md") });
+    assert.match(preview.data.content, /讨论文档/);
+    symlinkSync("/etc/passwd", join(workspace, "escape.md"));
+    const escaped = await f.call("POST", "/workspace/read", { roomId: created.roomId, path: join(workspace, "escape.md") });
+    assert.equal(escaped.status, 403, JSON.stringify(escaped.data));
+    assert.equal(escaped.data.error.code, "ROOM_BAD_PATH");
+    assert.notEqual(a.sessionId, b.sessionId);
+    await f.service.engine.flush();
+  } finally { await f.close(); }
+});
