@@ -203,6 +203,22 @@ function memberModelPill(member) {
   const label = `${info.provider} · ${info.name}${info.variant ? ` (${info.variant})` : ""}`;
   return `<span class="pill model" title="${escape(label)}">${escape(label)}</span>`;
 }
+function memberIssuePills(member) {
+  const pills = [];
+  if (member.lastError) {
+    const count = Number(member.failureCount);
+    pills.push(`<span class="pill error" title="${escape(member.lastError)}">模型调用失败${count > 1 ? ` ×${count}` : ""}</span>`);
+  }
+  if (member.wakeBackoffUntil) {
+    pills.push(`<span class="pill waiting-human" title="${escape(member.wakeBackoffUntil)}">退避至 ${escape(time(member.wakeBackoffUntil))}</span>`);
+  }
+  if (member.modelSynced === false) pills.push(`<span class="pill waiting-question">模型同步中</span>`);
+  return pills.join("");
+}
+function pausedReasonText(room) {
+  if (room.pausedReason === "provider-quota") return "模型额度或余额不足，自动唤醒已暂停。充值或更换模型后点击继续房间。";
+  return `自动唤醒已暂停（${room.pausedReason === "budget" ? "额度用尽" : "手动暂停"}）。发帖、阅读和提问仍可使用。`;
+}
 function modelSelectOptions() {
   return state.models.map(model => ({
     id: modelKey(model),
@@ -459,14 +475,14 @@ function renderRoomHeader() {
   const rootPill = rootStatus === "ready" ? "running" : rootStatus === "failed" ? "unknown" : "waiting-human";
   const rootChip = rootStatus || room.rootSessionId ? `<span class="member-chip root-session"><span>根会话</span>${rootStatus ? `<span class="pill ${rootPill}">${escape(rootStatusLabels[rootStatus] || rootStatus)}</span>` : ""}${room.rootSessionId ? `<button data-action="open-root-session" data-session="${escape(room.rootSessionId)}">会话组</button>` : ""}</span>` : "";
   $("#room-header").innerHTML = `
-    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">人类 · 房主</span></span>${room.members.map(member => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">创建失败：${escape(member.creationError || "未知原因")}</span>` : member.taskError ? `<span class="pill waiting-human">会话同步失败：${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">会话</button>` : ""}</span>`).join("")}</div></div>
+    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">人类 · 房主</span></span>${room.members.map(member => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">创建失败：${escape(member.creationError || "未知原因")}</span>` : `${member.taskError ? `<span class="pill waiting-human">会话同步失败：${escape(member.taskError)}</span>` : ""}${memberIssuePills(member)}<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">会话</button>` : ""}<button data-action="change-model" data-member="${escape(member.memberId)}">换模型</button></span>`).join("")}</div></div>
     <div class="room-controls">
       <button class="button ghost" data-action="open-workspace">文件</button>
       <span class="pill budget">余额 ${room.budget.remaining}/${room.budget.limit} · 第 ${room.budget.period} 段</span>
       ${room.status === "creating" ? `<button class="button secondary" data-action="retry">重试缺失会话</button>` : room.status !== "ended" ? `${paused ? `<button class="button primary" data-action="resume">继续房间</button>` : `<button class="button secondary" data-action="pause">暂停唤醒</button>`}<button class="button ghost danger" data-action="end">结束房间</button>` : ""}
     </div>
     ${rootStatus === "failed" ? `<div class="root-error">根会话创建失败：${escape(room.rootCreationError || "未知原因")}</div>` : ""}
-    ${paused && room.status !== "creating" ? `<div class="composer-hint">自动唤醒已暂停（${escape(room.pausedReason === "budget" ? "额度用尽" : "手动暂停")}）。发帖、阅读和提问仍可使用。</div>` : ""}
+    ${paused && room.status !== "creating" ? `<div class="composer-hint${room.pausedReason === "provider-quota" ? " provider-quota" : ""}">${escape(pausedReasonText(room))}</div>` : ""}
   `;
 }
 function renderAuthorFilter() {
@@ -680,6 +696,7 @@ async function openMessage(messageId) {
 }
 const modalSdkHandles = new Map();
 let fileBrowser = null;
+let memberModelPicker = null;
 function disposeModalSdk() {
   for (const handle of modalSdkHandles.values()) handle.dispose();
   modalSdkHandles.clear();
@@ -713,12 +730,51 @@ function fileName(path) {
 function textPreviewable(path) {
   return /\.(md|markdown|txt|log|csv)$/i.test(path);
 }
-function showModal(title, content) {
+function showModal(title, content, actions = "") {
   disposeModalSdk();
   fileBrowser = null;
-  $("#modal-content").innerHTML = `<h2>${escape(title)}</h2>${content}<div class="modal-actions"><button class="button secondary" data-action="close-modal">关闭</button></div>`;
+  memberModelPicker = null;
+  $("#modal-content").innerHTML = `<h2>${escape(title)}</h2>${content}<div class="modal-actions">${actions}<button class="button secondary" data-action="close-modal">关闭</button></div>`;
   $("#modal").classList.remove("file-browser-dialog");
   $("#modal").showModal();
+}
+function showChangeModel(member) {
+  if (!member || !state.roomId) return;
+  showModal(`更换模型 · ${member.displayName}`, `<p class="composer-hint">选择后会立即同步到该成员的会话。</p><div id="member-model-picker" class="model-picker modal-model-picker"></div>`, `<button class="button primary" data-action="submit-member-model">更换模型</button>`);
+  memberModelPicker = { memberId: member.memberId, displayName: member.displayName, modelKey: modelKey(member.model), submitting: false };
+  let picker;
+  picker = mountModalRoot($("#member-model-picker"), target => mountSelect(target, {
+    label: "模型",
+    value: memberModelPicker.modelKey || null,
+    options: modelSelectOptions(),
+    onChange: id => {
+      if (!memberModelPicker) return;
+      memberModelPicker.modelKey = id;
+      picker.update({ value: id });
+    },
+    placeholder: "请选择模型",
+    searchable: true,
+    searchPlaceholder: "搜索模型或提供商",
+    disabled: !state.models.length,
+  }));
+}
+async function submitMemberModel() {
+  if (!memberModelPicker || memberModelPicker.submitting || !state.roomId) return;
+  const member = state.room?.members.find(item => item.memberId === memberModelPicker.memberId);
+  const model = state.models.find(item => modelKey(item) === memberModelPicker.modelKey);
+  if (!member) return;
+  if (!model) return showError(new Error("请选择有效模型。"));
+  const body = { providerID: model.providerID, id: model.id, name: model.name || model.id, providerName: model.providerName || model.providerID, ...(model.variant ? { variant: model.variant } : {}) };
+  memberModelPicker.submitting = true;
+  try {
+    await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/members/${encodeURIComponent(member.memberId)}/model`, body);
+    $("#modal").close();
+    await refreshRoom();
+    toast(`已将 ${member.displayName} 更换为 ${body.providerName} · ${body.name}${body.variant ? ` (${body.variant})` : ""}。`, "success");
+  } catch (error) {
+    if (memberModelPicker) memberModelPicker.submitting = false;
+    showError(error);
+  }
 }
 function renderWorkspaceBreadcrumb() {
   if (!fileBrowser?.data) return;
@@ -944,6 +1000,7 @@ app.addEventListener("click", async event => {
     return;
   }
   if (action === "open-session" || action === "open-root-session") { persistView(); await host.openSession(button.dataset.session); return; }
+  if (action === "change-model") { const member = state.room?.members.find(item => item.memberId === button.dataset.member); if (member) showChangeModel(member); return; }
   if (action === "reply") {
     const message = state.timeline.find(item => item.messageId === button.dataset.message);
     state.replyTo = message; renderComposerChips(); $("#composer-text")?.focus(); return;
@@ -1023,9 +1080,10 @@ $("#modal").addEventListener("click", async event => {
   if (event.target === $("#modal")) { $("#modal").close(); return; }
   const button = event.target.closest("[data-action]");
   if (button?.dataset.action === "close-modal") { $("#modal").close(); return; }
+  if (button?.dataset.action === "submit-member-model") { await submitMemberModel(); return; }
   if (button?.dataset.action === "file-dir") { await loadWorkspaceDirectory(button.dataset.path); }
 });
-$("#modal").addEventListener("close", () => { disposeModalSdk(); fileBrowser = null; });
+$("#modal").addEventListener("close", () => { disposeModalSdk(); fileBrowser = null; memberModelPicker = null; });
 document.querySelectorAll(".mobile-tabs button").forEach(button => button.addEventListener("click", () => { state.mobilePane = button.dataset.pane; $("#room-view").dataset.mobilePane = state.mobilePane; document.querySelectorAll(".mobile-tabs button").forEach(item => item.classList.toggle("active", item === button)); persistView(); }));
 document.addEventListener("keydown", event => { if (event.key === "Escape") hideMentionMenu(); });
 

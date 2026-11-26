@@ -108,6 +108,34 @@ test("HTTP service authenticates host/plugin separately and creates rooms withou
     assert.equal(room.rootCreationStatus, "ready");
     assert.equal(room.members.length, 2);
     assert.ok(room.members.every(member => member.sessionStatus === "idle"));
+    const changed = await f.call("POST", `/rooms/${created.roomId}/members/${room.members[0].memberId}/model`, { model: { providerID: "probe", id: "replacement", name: "Replacement", providerName: "Probe" } });
+    assert.equal(changed.data.model.id, "replacement");
+    assert.equal(changed.data.modelSynced, false);
+    const modelJobs = await f.drainJobs();
+    assert.equal(modelJobs.filter(job => job.type === "change-session-model").length, 1);
+  } finally { await f.close(); }
+});
+
+test("structured provider quota errors pause the room and refund the accepted reminder", async () => {
+  const f = await fixture();
+  try {
+    const created = (await f.call("POST", "/rooms", { projectDir: f.root, title: "额度房间", members: [
+      { role: "generic", model: { providerID: "probe", id: "fake" } },
+      { role: "generic", model: { providerID: "probe", id: "fake" } },
+    ] })).data;
+    await f.drainJobs();
+    const room = (await f.call("GET", `/rooms/${created.roomId}`)).data;
+    await f.call("POST", `/rooms/${created.roomId}/messages`, { text: "触发唤醒", mentionMemberIds: [room.members[0].memberId] });
+    const jobs = await f.drainJobs();
+    const reminder = jobs.find(job => job.type === "submit-reminder");
+    assert.ok(reminder);
+    await f.call("POST", "/plugin/event", { type: "session.execution.started", id: "quota-start", data: { sessionID: reminder.sessionId } }, true);
+    await f.call("POST", "/plugin/event", { type: "session.execution.failed", id: "quota-failed", data: { sessionID: reminder.sessionId, error: { type: "QuotaExceeded", message: "Insufficient balance" } } }, true);
+    const paused = (await f.call("GET", `/rooms/${created.roomId}`)).data;
+    assert.equal(paused.status, "paused");
+    assert.equal(paused.pausedReason, "provider-quota");
+    assert.equal(paused.budget.remaining, 49);
+    assert.match(paused.members.find(member => member.memberId === reminder.memberId).lastError, /Insufficient balance/);
   } finally { await f.close(); }
 });
 

@@ -2985,6 +2985,22 @@ ${GUEST_UI_LOOK_CSS}`;
     const label = `${info.provider} \xB7 ${info.name}${info.variant ? ` (${info.variant})` : ""}`;
     return `<span class="pill model" title="${escape(label)}">${escape(label)}</span>`;
   }
+  function memberIssuePills(member) {
+    const pills = [];
+    if (member.lastError) {
+      const count = Number(member.failureCount);
+      pills.push(`<span class="pill error" title="${escape(member.lastError)}">\u6A21\u578B\u8C03\u7528\u5931\u8D25${count > 1 ? ` \xD7${count}` : ""}</span>`);
+    }
+    if (member.wakeBackoffUntil) {
+      pills.push(`<span class="pill waiting-human" title="${escape(member.wakeBackoffUntil)}">\u9000\u907F\u81F3 ${escape(time(member.wakeBackoffUntil))}</span>`);
+    }
+    if (member.modelSynced === false) pills.push(`<span class="pill waiting-question">\u6A21\u578B\u540C\u6B65\u4E2D</span>`);
+    return pills.join("");
+  }
+  function pausedReasonText(room) {
+    if (room.pausedReason === "provider-quota") return "\u6A21\u578B\u989D\u5EA6\u6216\u4F59\u989D\u4E0D\u8DB3\uFF0C\u81EA\u52A8\u5524\u9192\u5DF2\u6682\u505C\u3002\u5145\u503C\u6216\u66F4\u6362\u6A21\u578B\u540E\u70B9\u51FB\u7EE7\u7EED\u623F\u95F4\u3002";
+    return `\u81EA\u52A8\u5524\u9192\u5DF2\u6682\u505C\uFF08${room.pausedReason === "budget" ? "\u989D\u5EA6\u7528\u5C3D" : "\u624B\u52A8\u6682\u505C"}\uFF09\u3002\u53D1\u5E16\u3001\u9605\u8BFB\u548C\u63D0\u95EE\u4ECD\u53EF\u4F7F\u7528\u3002`;
+  }
   function modelSelectOptions() {
     return state.models.map((model) => ({
       id: modelKey(model),
@@ -3273,14 +3289,14 @@ ${GUEST_UI_LOOK_CSS}`;
     const rootPill = rootStatus === "ready" ? "running" : rootStatus === "failed" ? "unknown" : "waiting-human";
     const rootChip = rootStatus || room.rootSessionId ? `<span class="member-chip root-session"><span>\u6839\u4F1A\u8BDD</span>${rootStatus ? `<span class="pill ${rootPill}">${escape(rootStatusLabels[rootStatus] || rootStatus)}</span>` : ""}${room.rootSessionId ? `<button data-action="open-root-session" data-session="${escape(room.rootSessionId)}">\u4F1A\u8BDD\u7EC4</button>` : ""}</span>` : "";
     $("#room-header").innerHTML = `
-    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">\u4EBA\u7C7B \xB7 \u623F\u4E3B</span></span>${room.members.map((member) => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">\u521B\u5EFA\u5931\u8D25\uFF1A${escape(member.creationError || "\u672A\u77E5\u539F\u56E0")}</span>` : member.taskError ? `<span class="pill waiting-human">\u4F1A\u8BDD\u540C\u6B65\u5931\u8D25\uFF1A${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">\u4F1A\u8BDD</button>` : ""}</span>`).join("")}</div></div>
+    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">\u4EBA\u7C7B \xB7 \u623F\u4E3B</span></span>${room.members.map((member) => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">\u521B\u5EFA\u5931\u8D25\uFF1A${escape(member.creationError || "\u672A\u77E5\u539F\u56E0")}</span>` : `${member.taskError ? `<span class="pill waiting-human">\u4F1A\u8BDD\u540C\u6B65\u5931\u8D25\uFF1A${escape(member.taskError)}</span>` : ""}${memberIssuePills(member)}<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">\u4F1A\u8BDD</button>` : ""}<button data-action="change-model" data-member="${escape(member.memberId)}">\u6362\u6A21\u578B</button></span>`).join("")}</div></div>
     <div class="room-controls">
       <button class="button ghost" data-action="open-workspace">\u6587\u4EF6</button>
       <span class="pill budget">\u4F59\u989D ${room.budget.remaining}/${room.budget.limit} \xB7 \u7B2C ${room.budget.period} \u6BB5</span>
       ${room.status === "creating" ? `<button class="button secondary" data-action="retry">\u91CD\u8BD5\u7F3A\u5931\u4F1A\u8BDD</button>` : room.status !== "ended" ? `${paused ? `<button class="button primary" data-action="resume">\u7EE7\u7EED\u623F\u95F4</button>` : `<button class="button secondary" data-action="pause">\u6682\u505C\u5524\u9192</button>`}<button class="button ghost danger" data-action="end">\u7ED3\u675F\u623F\u95F4</button>` : ""}
     </div>
     ${rootStatus === "failed" ? `<div class="root-error">\u6839\u4F1A\u8BDD\u521B\u5EFA\u5931\u8D25\uFF1A${escape(room.rootCreationError || "\u672A\u77E5\u539F\u56E0")}</div>` : ""}
-    ${paused && room.status !== "creating" ? `<div class="composer-hint">\u81EA\u52A8\u5524\u9192\u5DF2\u6682\u505C\uFF08${escape(room.pausedReason === "budget" ? "\u989D\u5EA6\u7528\u5C3D" : "\u624B\u52A8\u6682\u505C")}\uFF09\u3002\u53D1\u5E16\u3001\u9605\u8BFB\u548C\u63D0\u95EE\u4ECD\u53EF\u4F7F\u7528\u3002</div>` : ""}
+    ${paused && room.status !== "creating" ? `<div class="composer-hint${room.pausedReason === "provider-quota" ? " provider-quota" : ""}">${escape(pausedReasonText(room))}</div>` : ""}
   `;
   }
   function renderAuthorFilter() {
@@ -3513,6 +3529,7 @@ ${GUEST_UI_LOOK_CSS}`;
   }
   var modalSdkHandles = /* @__PURE__ */ new Map();
   var fileBrowser = null;
+  var memberModelPicker = null;
   function disposeModalSdk() {
     for (const handle of modalSdkHandles.values()) handle.dispose();
     modalSdkHandles.clear();
@@ -3546,12 +3563,51 @@ ${GUEST_UI_LOOK_CSS}`;
   function textPreviewable(path) {
     return /\.(md|markdown|txt|log|csv)$/i.test(path);
   }
-  function showModal(title, content) {
+  function showModal(title, content, actions = "") {
     disposeModalSdk();
     fileBrowser = null;
-    $("#modal-content").innerHTML = `<h2>${escape(title)}</h2>${content}<div class="modal-actions"><button class="button secondary" data-action="close-modal">\u5173\u95ED</button></div>`;
+    memberModelPicker = null;
+    $("#modal-content").innerHTML = `<h2>${escape(title)}</h2>${content}<div class="modal-actions">${actions}<button class="button secondary" data-action="close-modal">\u5173\u95ED</button></div>`;
     $("#modal").classList.remove("file-browser-dialog");
     $("#modal").showModal();
+  }
+  function showChangeModel(member) {
+    if (!member || !state.roomId) return;
+    showModal(`\u66F4\u6362\u6A21\u578B \xB7 ${member.displayName}`, `<p class="composer-hint">\u9009\u62E9\u540E\u4F1A\u7ACB\u5373\u540C\u6B65\u5230\u8BE5\u6210\u5458\u7684\u4F1A\u8BDD\u3002</p><div id="member-model-picker" class="model-picker modal-model-picker"></div>`, `<button class="button primary" data-action="submit-member-model">\u66F4\u6362\u6A21\u578B</button>`);
+    memberModelPicker = { memberId: member.memberId, displayName: member.displayName, modelKey: modelKey(member.model), submitting: false };
+    let picker;
+    picker = mountModalRoot($("#member-model-picker"), (target) => mountSelect(target, {
+      label: "\u6A21\u578B",
+      value: memberModelPicker.modelKey || null,
+      options: modelSelectOptions(),
+      onChange: (id) => {
+        if (!memberModelPicker) return;
+        memberModelPicker.modelKey = id;
+        picker.update({ value: id });
+      },
+      placeholder: "\u8BF7\u9009\u62E9\u6A21\u578B",
+      searchable: true,
+      searchPlaceholder: "\u641C\u7D22\u6A21\u578B\u6216\u63D0\u4F9B\u5546",
+      disabled: !state.models.length
+    }));
+  }
+  async function submitMemberModel() {
+    if (!memberModelPicker || memberModelPicker.submitting || !state.roomId) return;
+    const member = state.room?.members.find((item) => item.memberId === memberModelPicker.memberId);
+    const model = state.models.find((item) => modelKey(item) === memberModelPicker.modelKey);
+    if (!member) return;
+    if (!model) return showError(new Error("\u8BF7\u9009\u62E9\u6709\u6548\u6A21\u578B\u3002"));
+    const body = { providerID: model.providerID, id: model.id, name: model.name || model.id, providerName: model.providerName || model.providerID, ...model.variant ? { variant: model.variant } : {} };
+    memberModelPicker.submitting = true;
+    try {
+      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/members/${encodeURIComponent(member.memberId)}/model`, body);
+      $("#modal").close();
+      await refreshRoom();
+      toast(`\u5DF2\u5C06 ${member.displayName} \u66F4\u6362\u4E3A ${body.providerName} \xB7 ${body.name}${body.variant ? ` (${body.variant})` : ""}\u3002`, "success");
+    } catch (error) {
+      if (memberModelPicker) memberModelPicker.submitting = false;
+      showError(error);
+    }
   }
   function renderWorkspaceBreadcrumb() {
     if (!fileBrowser?.data) return;
@@ -3821,6 +3877,11 @@ ${GUEST_UI_LOOK_CSS}`;
       await host.openSession(button2.dataset.session);
       return;
     }
+    if (action === "change-model") {
+      const member = state.room?.members.find((item) => item.memberId === button2.dataset.member);
+      if (member) showChangeModel(member);
+      return;
+    }
     if (action === "reply") {
       const message = state.timeline.find((item) => item.messageId === button2.dataset.message);
       state.replyTo = message;
@@ -4011,6 +4072,10 @@ ${GUEST_UI_LOOK_CSS}`;
       $("#modal").close();
       return;
     }
+    if (button2?.dataset.action === "submit-member-model") {
+      await submitMemberModel();
+      return;
+    }
     if (button2?.dataset.action === "file-dir") {
       await loadWorkspaceDirectory(button2.dataset.path);
     }
@@ -4018,6 +4083,7 @@ ${GUEST_UI_LOOK_CSS}`;
   $("#modal").addEventListener("close", () => {
     disposeModalSdk();
     fileBrowser = null;
+    memberModelPicker = null;
   });
   document.querySelectorAll(".mobile-tabs button").forEach((button2) => button2.addEventListener("click", () => {
     state.mobilePane = button2.dataset.pane;
