@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>多智能体讨论室</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="app-header">
+      <div class="brand"><span class="brand-mark">◌</span><strong>多智能体讨论室</strong></div>
+      <div class="header-actions">
+        <select id="room-select" aria-label="选择讨论室"></select>
+        <button id="new-room" class="button secondary">新建房间</button>
+      </div>
+    </header>
+    <div id="error" class="error" hidden></div>
+    <section id="create-view" class="create-view" hidden></section>
+    <main id="room-view" class="room-view" hidden>
+      <section class="chat-pane">
+        <div id="room-header" class="room-header"></div>
+        <div class="history-tools">
+          <input id="history-search" type="search" placeholder="搜索房间历史">
+          <select id="author-filter" aria-label="按作者筛选"></select>
+          <button id="older-button" class="button ghost">更早</button>
+          <button id="latest-button" class="button ghost">回到最新</button>
+        </div>
+        <div id="timeline" class="timeline" aria-live="polite"></div>
+        <div id="composer" class="composer"></div>
+      </section>
+      <aside class="question-pane">
+        <div class="question-heading">
+          <div><strong>待回答问题</strong><span id="pending-count" class="count">0</span></div>
+          <select id="question-status" aria-label="问题状态">
+            <option value="pending">待回答</option>
+            <option value="answered">已回答</option>
+            <option value="withdrawn">已撤回</option>
+          </select>
+        </div>
+        <div id="question-list" class="question-list"></div>
+      </aside>
+      <nav class="mobile-tabs">
+        <button data-pane="chat" class="active">讨论</button>
+        <button data-pane="questions">待答问题</button>
+      </nav>
+    </main>
+  </div>
+  <dialog id="modal"><div id="modal-content"></div></dialog>
+  <script src="main.js"></script>
+</body>
+</html>
