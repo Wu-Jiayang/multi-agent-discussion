@@ -10,7 +10,7 @@ import { RoomEngine } from "../core/room-engine.mjs";
 import { asRoomError, RoomError } from "../core/errors.mjs";
 import { MAX_AGENT_MESSAGE_WIDTH, UNICODE_IMPLEMENTATION } from "../core/display-width.mjs";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 const MAX_BODY = 1024 * 1024;
 
 function packageRoot() {

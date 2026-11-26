@@ -143,7 +143,7 @@ var index_default = {
       events: { changed: { schema: { type: "object", properties: { roomId: { type: "string" } }, required: ["roomId"], additionalProperties: false } } }
     };
     await ctx.rpc.register(RoomRPC, {
-      health: async () => ({ plugin: "multi-agent-discussion", version: "0.1.0" }),
+      health: async () => ({ plugin: "multi-agent-discussion", version: "0.1.1" }),
       room: async (input) => rpc("/plugin/rpc/room", input)
     });
     async function publishCatalog() {
