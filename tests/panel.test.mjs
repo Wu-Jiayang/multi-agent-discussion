@@ -10,6 +10,7 @@ const tokens={background:'#111',elevated:'#191919',foreground:'#eee',muted:'#999
 const errors=[];
 const serviceCalls=[];
 const hostCalls=[];
+const nativeDialogCalls=[];
 const projects=[
   {id:'p_demo',name:'Demo 项目',directory:'/workspace/demo'},
   {id:'p_other',name:'另一个项目',directory:'/workspace/other'},
@@ -68,6 +69,8 @@ dom=new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html'
         else if(p.path.startsWith('/rooms/'+room.roomId+'/members/')&&p.path.endsWith('/model')&&p.method==='POST'){const input=JSON.parse(p.body);const memberId=p.path.split('/')[4];const member=room.members.find(item=>item.memberId===memberId);if(member){member.model=input;member.lastError=null;member.failureCount=0;member.wakeBackoffUntil=null;}data={status:'updated',memberId,model:input}}
         else if(p.path==='/rooms/'+room.roomId+'/messages'&&p.method==='POST'){const input=JSON.parse(p.body);const seq=room.latestSeq+1;const message={messageId:'m_new_'+seq,roomSeq:seq,author:room.human,isOwn:true,kind:'post',createdAt:new Date().toISOString(),mentions:[],mentionAll:false,replyToMessageId:input.replyToMessageId||null,questionId:null,questionStatus:null,answerMessageId:null,label:'[#'+seq+' 房主 · 人类 · 你]',text:input.text,options:[],full:true,preview:false};messages.push(message);room.latestSeq=seq;data={status:'stored',messageId:message.messageId,roomSeq:seq,timeline:messages.slice(-8)}}
         else if(p.path.includes('/answer')){questions=[];room.pendingQuestions=0;data={status:'answered',answerMessageId:'m_answer',messageId:'m_answer',roomSeq:3}}
+        else if(p.path.includes('/withdraw')){const questionId=p.path.split('/')[4];questions=questions.filter(item=>item.questionId!==questionId);room.pendingQuestions=questions.length;data={status:'withdrawn',questionId}}
+        else if(p.path==='/rooms/'+room.roomId+'/end'&&p.method==='POST'){room.status='ended';room.endedAt=new Date().toISOString();data={status:'ended'}}
         else if(p.path.includes('/receipts'))data={messageId:'m_1',human:null,agents:[{memberId:'m_a',displayName:'提案者',kind:'agent',readAt:new Date().toISOString(),source:'model-context'}]};
         else if(p.path==='/rooms/'+room.roomId+'/read')data={marked:1,unread:{unreadCount:0,unreadMentionCount:0,unreadMentions:[]}};
         else if(p.path==='/workspace/list')data={rootPath:room.workspaceDir,path:room.workspaceDir,relativePath:'',parentPath:null,entries:[{name:'review',path:room.workspaceDir+'/review',relativePath:'review',kind:'directory',size:null,mtime:new Date().toISOString()},{name:'a.md',path:room.workspaceDir+'/a.md',relativePath:'a.md',kind:'file',size:6,mtime:new Date().toISOString()}]};
@@ -85,7 +88,7 @@ dom=new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html'
   window.HTMLElement.prototype.scrollIntoView=function(){};
   window.HTMLDialogElement.prototype.showModal=function(){this.setAttribute('open','')};
   window.HTMLDialogElement.prototype.close=function(){this.removeAttribute('open')};
-  window.confirm=()=>true;window.prompt=()=> '';
+  window.confirm=()=>{nativeDialogCalls.push('confirm');return false};window.prompt=()=>{nativeDialogCalls.push('prompt');return null};
 }});
 const window=dom.window;const document=window.document;
 async function waitFor(fn,label){for(let i=0;i<100;i++){if(fn())return;await new Promise(r=>setTimeout(r,20));}throw new Error('Timeout '+label+'; errors='+errors.join('\n')+'; project='+document.querySelector('#project-picker')?.textContent+'; file='+document.querySelector('#file-list')?.textContent+'; modal='+document.querySelector('#modal-content')?.textContent+'; error='+document.querySelector('#error')?.textContent)}
@@ -148,9 +151,24 @@ await waitFor(()=>document.querySelector('#question-list').textContent.includes(
 room.rootCreationStatus='failed';room.rootCreationError='模拟根会话失败';
 await new Promise(resolve=>setTimeout(resolve,1900));
 assert.ok(document.querySelector('#question-list').textContent.includes('第二个问题'),'polling must preserve appended questions');
+document.querySelector('.question-item[data-question="q_2"]').click();
+await waitFor(()=>document.querySelector('[data-action="withdraw-question"][data-question="q_2"]'),'withdraw action');
+document.querySelector('[data-action="withdraw-question"][data-question="q_2"]').click();
+await waitFor(()=>document.querySelector('#modal').hasAttribute('open')&&document.querySelector('#withdraw-note'),'withdraw confirmation modal');
+assert.equal(serviceCalls.some(call=>call.path.includes('/withdraw')),false,'opening withdraw confirmation does not submit');
+document.querySelector('#modal-content [data-action="close-modal"]').click();
+assert.equal(serviceCalls.some(call=>call.path.includes('/withdraw')),false,'cancelling withdraw does not submit');
+document.querySelector('[data-action="withdraw-question"][data-question="q_2"]').click();
+await waitFor(()=>document.querySelector('#withdraw-note'),'withdraw confirmation reopens');
+document.querySelector('#withdraw-note').value='与已有问题重复';
+document.querySelector('#modal-content [data-action="submit-withdraw"]').click();
+const withdrawPath='/rooms/'+room.roomId+'/questions/q_2/withdraw';
+await waitFor(()=>serviceCalls.some(call=>call.path===withdrawPath&&call.method==='POST'),'question withdrawn');
+assert.deepEqual(JSON.parse(serviceCalls.find(call=>call.path===withdrawPath).body),{note:'与已有问题重复'},'withdraw note comes from the in-page form');
+await waitFor(()=>!document.querySelector('#modal').hasAttribute('open')&&!document.querySelector('.question-item[data-question="q_2"]'),'withdraw modal closes and question disappears');
 document.querySelector('#new-room').click();
 await waitFor(()=>!document.querySelector('#create-view').hidden,'create view');
-assert.ok(document.querySelector('#create-view .intro').textContent.includes('每个房间创建一个根会话；成员会话不显示在侧栏，可从成员“会话”按钮打开。建房本身不会调用模型'),'create intro describes the root session');
+assert.ok(document.querySelector('#create-view .intro').textContent.includes('每个房间创建一个根会话；成员会话显示在根会话下方，也可从成员“会话”按钮打开。建房本身不会调用模型'),'create intro describes nested member sessions');
 assert.equal(document.querySelectorAll('.agent-editor').length,2);
 assert.equal(document.querySelectorAll('.agent-editor .model-picker .oc-sdk-trigger').length,2,'model pickers use the SDK select');
 const firstModel=document.querySelector('.agent-editor .model-picker');
@@ -178,12 +196,23 @@ window.dispatchEvent(new window.MessageEvent('message',{data:{channel:'openchamb
 await waitFor(()=>document.querySelector('#room-header').textContent.includes('模型额度或余额不足，自动唤醒已暂停。充值或更换模型后点击继续房间。'),'provider quota hint');
 assert.ok([...document.querySelectorAll('#room-header .composer-hint')].some(hint=>hint.classList.contains('provider-quota')&&hint.textContent.includes('模型额度或余额不足')),'provider quota hint is highlighted');
 assert.ok(document.querySelector('[data-action="resume"]'),'provider quota still offers the existing resume action');
+document.querySelector('[data-action="end"]').click();
+await waitFor(()=>document.querySelector('#modal').hasAttribute('open')&&document.querySelector('[data-action="confirm-end-room"]'),'end confirmation modal');
+assert.equal(serviceCalls.some(call=>call.path==='/rooms/'+room.roomId+'/end'),false,'opening end confirmation does not end the room');
+document.querySelector('#modal-content [data-action="close-modal"]').click();
+assert.equal(serviceCalls.some(call=>call.path==='/rooms/'+room.roomId+'/end'),false,'cancelling end keeps the room active');
+document.querySelector('[data-action="end"]').click();
+await waitFor(()=>document.querySelector('[data-action="confirm-end-room"]'),'end confirmation reopens');
+document.querySelector('[data-action="confirm-end-room"]').click();
+await waitFor(()=>serviceCalls.some(call=>call.path==='/rooms/'+room.roomId+'/end'&&call.method==='POST'),'room ended');
+await waitFor(()=>room.status==='ended'&&!document.querySelector('[data-action="end"]')&&document.querySelector('#composer-text').disabled,'ended room disables composer');
+assert.deepEqual(nativeDialogCalls,[],'sandboxed panel never uses native confirm or prompt');
 document.querySelector('#new-room').click();
 await waitFor(()=>!document.querySelector('#create-view').hidden,'create view after project switch');
 await waitFor(()=>document.querySelector('#model-source-hint').textContent.includes('其他项目'),'global model fallback hint');
 assert.ok(serviceCalls.some(call=>call.path==='/models'&&call.query?.directory==='/workspace/other'),'models reload for switched project');
 assert.deepEqual(errors,[]);
-console.log('PASS panel DOM smoke: project picker, SDK model picker, member model change, failure pills, provider quota hint, create form, role defaults, question answer, composer, receipts modal, global fallback');
+console.log('PASS panel DOM smoke: project picker, SDK model picker, member model change, failure pills, provider quota hint, create form, role defaults, question answer, withdraw/end dialogs, composer, receipts modal, global fallback');
 window.close();
 store.close();
 rmSync(panelRoot,{recursive:true,force:true});

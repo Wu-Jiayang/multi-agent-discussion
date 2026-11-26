@@ -385,7 +385,7 @@ export class RoomEngine {
           jobId: `root:${roomId}`, type: "create-root-session", roomId,
           sessionId: room.root_session_id, title: `${room.title} · 讨论室`, directory: room.project_dir,
           metadata: { discussionRoomId: roomId, discussionRoot: true },
-          note: `这是“${room.title}”的讨论室会话组。成员会话不会显示在侧栏，请从“多智能体讨论室”页面中的成员“会话”按钮打开。房间自动调度不会向本会话调用模型；请勿直接向本会话发送议题。`,
+          note: `这是“${room.title}”的讨论室会话组。成员会话显示在本会话下方，也可以从“多智能体讨论室”页面中的成员“会话”按钮直接打开。房间自动调度不会向本会话调用模型；请勿直接向本会话发送议题。`,
         };
       }
       for (const member of this.store.agents(roomId)) {
@@ -393,7 +393,7 @@ export class RoomEngine {
         const metadata = {
           discussionRoomId: roomId,
           discussionMemberId: member.id,
-          ...(rootReady ? { openchamber: { kind: "workflow-agent", parentID: room.root_session_id } } : {}),
+          ...(rootReady ? { openchamber: { kind: "operator-child", parentID: room.root_session_id } } : {}),
         };
         const title = `${room.title} · ${member.display_name}`;
         if (member.session_id && !member.session_linked && rootReady) {

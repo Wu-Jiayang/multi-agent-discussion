@@ -1418,9 +1418,9 @@
         return result;
       }),
       generate: (input) => {
-        const prompt2 = input.prompt.trim();
+        const prompt = input.prompt.trim();
         const system = input.system?.trim();
-        if (prompt2.length === 0 || prompt2.length > GUEST_GENERATE_PROMPT_MAX) {
+        if (prompt.length === 0 || prompt.length > GUEST_GENERATE_PROMPT_MAX) {
           return Promise.reject(new HostRequestError("HOST_REJECTED", `Prompt must be 1 to ${GUEST_GENERATE_PROMPT_MAX} characters.`));
         }
         if (system !== void 0 && (system.length === 0 || system.length > GUEST_GENERATE_SYSTEM_MAX)) {
@@ -1430,7 +1430,7 @@
         if (maxOutputTokens !== void 0 && !Number.isFinite(maxOutputTokens)) {
           return Promise.reject(new HostRequestError("HOST_REJECTED", "maxOutputTokens must be a number."));
         }
-        const payload = { prompt: prompt2 };
+        const payload = { prompt };
         if (system !== void 0)
           payload.system = system;
         if (maxOutputTokens !== void 0)
@@ -3139,7 +3139,7 @@ ${GUEST_UI_LOOK_CSS}`;
     const preset = state.createPreset || "generic";
     $("#create-view").innerHTML = `
     <h1>\u65B0\u5EFA\u8BA8\u8BBA\u5BA4</h1>
-    <p class="intro">\u6BCF\u4E2A\u623F\u95F4\u521B\u5EFA\u4E00\u4E2A\u6839\u4F1A\u8BDD\uFF1B\u6210\u5458\u4F1A\u8BDD\u4E0D\u663E\u793A\u5728\u4FA7\u680F\uFF0C\u53EF\u4ECE\u6210\u5458\u201C\u4F1A\u8BDD\u201D\u6309\u94AE\u6253\u5F00\u3002\u5EFA\u623F\u672C\u8EAB\u4E0D\u4F1A\u8C03\u7528\u6A21\u578B\u3002</p>
+    <p class="intro">\u6BCF\u4E2A\u623F\u95F4\u521B\u5EFA\u4E00\u4E2A\u6839\u4F1A\u8BDD\uFF1B\u6210\u5458\u4F1A\u8BDD\u663E\u793A\u5728\u6839\u4F1A\u8BDD\u4E0B\u65B9\uFF0C\u4E5F\u53EF\u4ECE\u6210\u5458\u201C\u4F1A\u8BDD\u201D\u6309\u94AE\u6253\u5F00\u3002\u5EFA\u623F\u672C\u8EAB\u4E0D\u4F1A\u8C03\u7528\u6A21\u578B\u3002</p>
     <div class="form-grid">
       <div class="field"><label>\u623F\u95F4\u540D\u79F0</label><input id="create-title" value="${escape(state.createTitle || "\u65B0\u7684\u8BA8\u8BBA\u5BA4")}" maxlength="120"></div>
       <div class="field"><label>\u9884\u8BBE</label><select id="create-preset"><option value="generic" ${preset === "generic" ? "selected" : ""}>\u666E\u901A\u8BA8\u8BBA</option><option value="debate" ${preset === "debate" ? "selected" : ""}>\u53CC\u6A21\u578B\u8FA9\u8BBA</option></select></div>
@@ -3571,6 +3571,16 @@ ${GUEST_UI_LOOK_CSS}`;
     $("#modal").classList.remove("file-browser-dialog");
     $("#modal").showModal();
   }
+  function showEndRoomConfirmation() {
+    if (!state.roomId || state.room?.status === "ended") return;
+    showModal("\u7ED3\u675F\u623F\u95F4", `<p>\u786E\u5B9A\u7ED3\u675F\u201C${escape(state.room?.title || "\u5F53\u524D\u623F\u95F4")}\u201D\uFF1F</p><p class="composer-hint">\u4F1A\u505C\u6B62\u540E\u7EED\u81EA\u52A8\u5524\u9192\u5E76\u79FB\u9664\u672C\u6269\u5C55\u6DFB\u52A0\u7684\u4F1A\u8BDD\u6307\u4EE4\uFF0C\u4F46\u4FDD\u7559\u8BA8\u8BBA\u8BB0\u5F55\u548C\u4F1A\u8BDD\u3002</p>`, `<button class="button secondary danger" data-action="confirm-end-room">\u7ED3\u675F\u623F\u95F4</button>`);
+  }
+  function showWithdrawQuestion(questionId) {
+    const question = state.questions.find((item) => item.questionId === questionId);
+    if (!question || question.status !== "pending") return;
+    showModal("\u64A4\u56DE\u95EE\u9898", `<p>\u786E\u5B9A\u64A4\u56DE\u201C${escape(question.text)}\u201D\uFF1F</p><label class="field"><span>\u64A4\u56DE\u8BF4\u660E\uFF08\u53EF\u7559\u7A7A\uFF09</span><textarea id="withdraw-note" maxlength="1000" placeholder="\u4F8B\u5982\uFF1A\u4E0E\u53E6\u4E00\u4E2A\u95EE\u9898\u91CD\u590D"></textarea></label><p class="composer-hint">\u64A4\u56DE\u540E\u4F1A\u66F4\u65B0\u95EE\u9898\u72B6\u6001\uFF0C\u4E0D\u4F1A\u5524\u9192\u5176\u4ED6\u6210\u5458\u3002</p>`, `<button class="button secondary danger" data-action="submit-withdraw" data-question="${escape(questionId)}">\u786E\u8BA4\u64A4\u56DE</button>`);
+    $("#withdraw-note").focus();
+  }
   function showChangeModel(member) {
     if (!member || !state.roomId) return;
     showModal(`\u66F4\u6362\u6A21\u578B \xB7 ${member.displayName}`, `<p class="composer-hint">\u9009\u62E9\u540E\u4F1A\u7ACB\u5373\u540C\u6B65\u5230\u8BE5\u6210\u5458\u7684\u4F1A\u8BDD\u3002</p><div id="member-model-picker" class="model-picker modal-model-picker"></div>`, `<button class="button primary" data-action="submit-member-model">\u66F4\u6362\u6A21\u578B</button>`);
@@ -3607,6 +3617,37 @@ ${GUEST_UI_LOOK_CSS}`;
     } catch (error) {
       if (memberModelPicker) memberModelPicker.submitting = false;
       showError(error);
+    }
+  }
+  async function endRoom() {
+    if (!state.roomId || state.room?.status === "ended") return;
+    try {
+      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/end`);
+      await refreshRoom();
+      renderComposer();
+      toast("\u623F\u95F4\u5DF2\u7ED3\u675F\uFF0C\u8BA8\u8BBA\u8BB0\u5F55\u548C\u4F1A\u8BDD\u5DF2\u4FDD\u7559\u3002", "success");
+    } catch (error) {
+      showError(error);
+    }
+  }
+  async function withdrawQuestion(questionId, note) {
+    if (!state.roomId) return;
+    try {
+      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/questions/${encodeURIComponent(questionId)}/withdraw`, { note });
+      $("#modal").close();
+      state.questionSignature = "";
+      state.questionFirstSignature = "";
+      state.questionCursor = null;
+      await loadQuestions();
+    } catch (error) {
+      showError(error);
+      if (error.code === "ROOM_QUESTION_CONFLICT") {
+        $("#modal").close();
+        state.questionSignature = "";
+        state.questionFirstSignature = "";
+        state.questionCursor = null;
+        await Promise.all([refreshRoom(), loadQuestions()]);
+      }
     }
   }
   function renderWorkspaceBreadcrumb() {
@@ -3861,12 +3902,14 @@ ${GUEST_UI_LOOK_CSS}`;
       return;
     }
     if (action === "pause" || action === "resume" || action === "retry" || action === "end") {
+      if (action === "end") {
+        showEndRoomConfirmation();
+        return;
+      }
       try {
-        if (action === "end" && !confirm("\u7ED3\u675F\u623F\u95F4\uFF1F\u4F1A\u505C\u6B62\u540E\u7EED\u81EA\u52A8\u5524\u9192\u5E76\u79FB\u9664\u672C\u6269\u5C55\u6DFB\u52A0\u7684\u4F1A\u8BDD\u6307\u4EE4\uFF0C\u4F46\u4FDD\u7559\u8BA8\u8BBA\u8BB0\u5F55\u548C\u4F1A\u8BDD\u3002")) return;
         await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/${action}`, action === "resume" ? { budgetLimit: state.room?.budget.limit || 50 } : void 0);
         await refreshRoom();
         if (action === "resume") await loadTimeline(true);
-        if (action === "end") renderComposer();
       } catch (error) {
         showError(error);
       }
@@ -3946,23 +3989,7 @@ ${GUEST_UI_LOOK_CSS}`;
       return;
     }
     if (action === "withdraw-question") {
-      const note = prompt("\u64A4\u56DE\u8BF4\u660E\uFF08\u53EF\u7559\u7A7A\uFF09", "");
-      if (note == null) return;
-      try {
-        await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/questions/${encodeURIComponent(button2.dataset.question)}/withdraw`, { note });
-        state.questionSignature = "";
-        state.questionFirstSignature = "";
-        state.questionCursor = null;
-        await loadQuestions();
-      } catch (error) {
-        showError(error);
-        if (error.code === "ROOM_QUESTION_CONFLICT") {
-          state.questionSignature = "";
-          state.questionFirstSignature = "";
-          state.questionCursor = null;
-          await Promise.all([refreshRoom(), loadQuestions()]);
-        }
-      }
+      showWithdrawQuestion(button2.dataset.question);
       return;
     }
     if (action === "close-modal") {
@@ -4070,6 +4097,18 @@ ${GUEST_UI_LOOK_CSS}`;
     const button2 = event.target.closest("[data-action]");
     if (button2?.dataset.action === "close-modal") {
       $("#modal").close();
+      return;
+    }
+    if (button2?.dataset.action === "confirm-end-room") {
+      $("#modal").close();
+      await endRoom();
+      return;
+    }
+    if (button2?.dataset.action === "submit-withdraw") {
+      const note = $("#withdraw-note")?.value || "";
+      button2.disabled = true;
+      await withdrawQuestion(button2.dataset.question, note);
+      if ($("#modal").hasAttribute("open")) button2.disabled = false;
       return;
     }
     if (button2?.dataset.action === "submit-member-model") {

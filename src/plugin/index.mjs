@@ -146,7 +146,7 @@ export default {
       events: { changed: { schema: { type: "object", properties: { roomId: { type: "string" } }, required: ["roomId"], additionalProperties: false } } },
     };
     await ctx.rpc.register(RoomRPC, {
-      health: async () => ({ plugin: "multi-agent-discussion", version: "0.1.1" }),
+      health: async () => ({ plugin: "multi-agent-discussion", version: "0.1.2" }),
       room: async input => rpc("/plugin/rpc/room", input),
     });
 
@@ -174,6 +174,15 @@ export default {
       }
     }
 
+    async function syncSessionGrouping(job, existing) {
+      const metadata = {
+        ...existing.metadata,
+        ...job.metadata,
+        openchamber: { ...existing.metadata?.openchamber, ...job.metadata.openchamber },
+      };
+      await ctx.session.update({ sessionID: job.sessionId, title: job.title, metadata });
+    }
+
     async function executeJob(job) {
       let result;
       try {
@@ -186,7 +195,7 @@ export default {
           }
           try {
             await ctx.session.synthetic({
-              sessionID: created.id, id: `msg_discussion_root_${job.roomId}`, text: job.note,
+              sessionID: created.id, id: `msg_discussion_root_${job.roomId}_v2`, text: job.note,
               description: "多智能体讨论室会话组", resume: false,
               metadata: { source: "multi-agent-discussion-root", discussionRoomId: job.roomId },
             });
@@ -207,12 +216,7 @@ export default {
           result = { outcome: "accepted", sessionId: created.id };
         } else if (job.type === "link-session") {
           const existing = await ctx.session.get({ sessionID: job.sessionId });
-          const metadata = {
-            ...existing.metadata,
-            ...job.metadata,
-            openchamber: { ...existing.metadata?.openchamber, ...job.metadata.openchamber },
-          };
-          await ctx.session.update({ sessionID: job.sessionId, title: job.title, metadata });
+          await syncSessionGrouping(job, existing);
           result = { outcome: "accepted" };
         } else if (job.type === "change-session-model") {
           const model = { providerID: job.model.providerID, id: job.model.id };
@@ -241,7 +245,7 @@ export default {
             if (matchesRoot) {
               try {
                 await ctx.session.synthetic({
-                  sessionID: existing.id, id: `msg_discussion_root_${job.roomId}`, text: job.note,
+                  sessionID: existing.id, id: `msg_discussion_root_${job.roomId}_v2`, text: job.note,
                   description: "多智能体讨论室会话组", resume: false,
                   metadata: { source: "multi-agent-discussion-root", discussionRoomId: job.roomId },
                 });
@@ -249,6 +253,7 @@ export default {
                 if (noteError?.code !== "CONFLICT") console.error("Discussion root note failed", noteError.message);
               }
             }
+            if (matchesMember && job.metadata?.openchamber) await syncSessionGrouping(job, existing);
             if (matchesRoot || matchesMember) result = { outcome: "accepted", sessionId: existing.id };
           } catch {}
         }

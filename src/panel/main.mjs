@@ -350,7 +350,7 @@ function renderCreate() {
   const preset = state.createPreset || "generic";
   $("#create-view").innerHTML = `
     <h1>新建讨论室</h1>
-    <p class="intro">每个房间创建一个根会话；成员会话不显示在侧栏，可从成员“会话”按钮打开。建房本身不会调用模型。</p>
+    <p class="intro">每个房间创建一个根会话；成员会话显示在根会话下方，也可从成员“会话”按钮打开。建房本身不会调用模型。</p>
     <div class="form-grid">
       <div class="field"><label>房间名称</label><input id="create-title" value="${escape(state.createTitle || "新的讨论室")}" maxlength="120"></div>
       <div class="field"><label>预设</label><select id="create-preset"><option value="generic" ${preset === "generic" ? "selected" : ""}>普通讨论</option><option value="debate" ${preset === "debate" ? "selected" : ""}>双模型辩论</option></select></div>
@@ -738,6 +738,16 @@ function showModal(title, content, actions = "") {
   $("#modal").classList.remove("file-browser-dialog");
   $("#modal").showModal();
 }
+function showEndRoomConfirmation() {
+  if (!state.roomId || state.room?.status === "ended") return;
+  showModal("结束房间", `<p>确定结束“${escape(state.room?.title || "当前房间")}”？</p><p class="composer-hint">会停止后续自动唤醒并移除本扩展添加的会话指令，但保留讨论记录和会话。</p>`, `<button class="button secondary danger" data-action="confirm-end-room">结束房间</button>`);
+}
+function showWithdrawQuestion(questionId) {
+  const question = state.questions.find(item => item.questionId === questionId);
+  if (!question || question.status !== "pending") return;
+  showModal("撤回问题", `<p>确定撤回“${escape(question.text)}”？</p><label class="field"><span>撤回说明（可留空）</span><textarea id="withdraw-note" maxlength="1000" placeholder="例如：与另一个问题重复"></textarea></label><p class="composer-hint">撤回后会更新问题状态，不会唤醒其他成员。</p>`, `<button class="button secondary danger" data-action="submit-withdraw" data-question="${escape(questionId)}">确认撤回</button>`);
+  $("#withdraw-note").focus();
+}
 function showChangeModel(member) {
   if (!member || !state.roomId) return;
   showModal(`更换模型 · ${member.displayName}`, `<p class="composer-hint">选择后会立即同步到该成员的会话。</p><div id="member-model-picker" class="model-picker modal-model-picker"></div>`, `<button class="button primary" data-action="submit-member-model">更换模型</button>`);
@@ -774,6 +784,31 @@ async function submitMemberModel() {
   } catch (error) {
     if (memberModelPicker) memberModelPicker.submitting = false;
     showError(error);
+  }
+}
+async function endRoom() {
+  if (!state.roomId || state.room?.status === "ended") return;
+  try {
+    await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/end`);
+    await refreshRoom();
+    renderComposer();
+    toast("房间已结束，讨论记录和会话已保留。", "success");
+  } catch (error) { showError(error); }
+}
+async function withdrawQuestion(questionId, note) {
+  if (!state.roomId) return;
+  try {
+    await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/questions/${encodeURIComponent(questionId)}/withdraw`, { note });
+    $("#modal").close();
+    state.questionSignature = ""; state.questionFirstSignature = ""; state.questionCursor = null;
+    await loadQuestions();
+  } catch (error) {
+    showError(error);
+    if (error.code === "ROOM_QUESTION_CONFLICT") {
+      $("#modal").close();
+      state.questionSignature = ""; state.questionFirstSignature = ""; state.questionCursor = null;
+      await Promise.all([refreshRoom(), loadQuestions()]);
+    }
   }
 }
 function renderWorkspaceBreadcrumb() {
@@ -990,12 +1025,11 @@ app.addEventListener("click", async event => {
     return;
   }
   if (action === "pause" || action === "resume" || action === "retry" || action === "end") {
+    if (action === "end") { showEndRoomConfirmation(); return; }
     try {
-      if (action === "end" && !confirm("结束房间？会停止后续自动唤醒并移除本扩展添加的会话指令，但保留讨论记录和会话。")) return;
       await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/${action}`, action === "resume" ? { budgetLimit: state.room?.budget.limit || 50 } : undefined);
       await refreshRoom();
       if (action === "resume") await loadTimeline(true);
-      if (action === "end") renderComposer();
     } catch (error) { showError(error); }
     return;
   }
@@ -1023,18 +1057,7 @@ app.addEventListener("click", async event => {
   if (action === "open-workspace") { await openWorkspaceBrowser(); return; }
   if (action === "open-file") { await openWorkspaceBrowser(button.dataset.path); return; }
   if (action === "more-questions") { await loadQuestions(true); return; }
-  if (action === "withdraw-question") {
-    const note = prompt("撤回说明（可留空）", "");
-    if (note == null) return;
-    try {
-      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/questions/${encodeURIComponent(button.dataset.question)}/withdraw`, { note });
-      state.questionSignature = ""; state.questionFirstSignature = ""; state.questionCursor = null; await loadQuestions();
-    } catch (error) {
-      showError(error);
-      if (error.code === "ROOM_QUESTION_CONFLICT") { state.questionSignature = ""; state.questionFirstSignature = ""; state.questionCursor = null; await Promise.all([refreshRoom(), loadQuestions()]); }
-    }
-    return;
-  }
+  if (action === "withdraw-question") { showWithdrawQuestion(button.dataset.question); return; }
   if (action === "close-modal") { $("#modal").close(); }
 });
 app.addEventListener("change", async event => {
@@ -1080,6 +1103,14 @@ $("#modal").addEventListener("click", async event => {
   if (event.target === $("#modal")) { $("#modal").close(); return; }
   const button = event.target.closest("[data-action]");
   if (button?.dataset.action === "close-modal") { $("#modal").close(); return; }
+  if (button?.dataset.action === "confirm-end-room") { $("#modal").close(); await endRoom(); return; }
+  if (button?.dataset.action === "submit-withdraw") {
+    const note = $("#withdraw-note")?.value || "";
+    button.disabled = true;
+    await withdrawQuestion(button.dataset.question, note);
+    if ($("#modal").hasAttribute("open")) button.disabled = false;
+    return;
+  }
   if (button?.dataset.action === "submit-member-model") { await submitMemberModel(); return; }
   if (button?.dataset.action === "file-dir") { await loadWorkspaceDirectory(button.dataset.path); }
 });

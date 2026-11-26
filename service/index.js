@@ -9458,6 +9458,10 @@ var RoomStore = class {
     })) {
       if (!memberColumns.has(name)) this.db.exec(`ALTER TABLE members ADD COLUMN ${name} ${definition}`);
     }
+    if (previousSchema !== "6") {
+      this.db.exec("UPDATE members SET session_linked=0 WHERE kind='agent' AND session_id IS NOT NULL");
+      this.db.exec("UPDATE rooms SET root_creation_status='pending',root_creation_error='\u6B63\u5728\u66F4\u65B0\u4F1A\u8BDD\u7EC4\u8BF4\u660E',root_next_attempt_at=NULL WHERE status<>'ended' AND root_creation_status='ready' AND root_session_id IS NOT NULL");
+    }
     const presentationColumns = new Set(this.db.prepare("PRAGMA table_info(presentations)").all().map((row) => row.name));
     if (!presentationColumns.has("observed_at")) this.db.exec("ALTER TABLE presentations ADD COLUMN observed_at TEXT");
     const periodColumns = new Set(this.db.prepare("PRAGMA table_info(budget_periods)").all().map((row) => row.name));
@@ -9475,7 +9479,7 @@ var RoomStore = class {
           WHERE budget_periods.room_id=rooms.id AND budget_periods.period=rooms.budget_period));
       `);
     }
-    this.db.prepare("INSERT INTO meta(key,value) VALUES('schema','5') ON CONFLICT(key) DO UPDATE SET value='5'").run();
+    this.db.prepare("INSERT INTO meta(key,value) VALUES('schema','6') ON CONFLICT(key) DO UPDATE SET value='6'").run();
   }
   close() {
     this.db.close();
@@ -10936,7 +10940,7 @@ var RoomEngine = class {
           title: `${room.title} \xB7 \u8BA8\u8BBA\u5BA4`,
           directory: room.project_dir,
           metadata: { discussionRoomId: roomId, discussionRoot: true },
-          note: `\u8FD9\u662F\u201C${room.title}\u201D\u7684\u8BA8\u8BBA\u5BA4\u4F1A\u8BDD\u7EC4\u3002\u6210\u5458\u4F1A\u8BDD\u4E0D\u4F1A\u663E\u793A\u5728\u4FA7\u680F\uFF0C\u8BF7\u4ECE\u201C\u591A\u667A\u80FD\u4F53\u8BA8\u8BBA\u5BA4\u201D\u9875\u9762\u4E2D\u7684\u6210\u5458\u201C\u4F1A\u8BDD\u201D\u6309\u94AE\u6253\u5F00\u3002\u623F\u95F4\u81EA\u52A8\u8C03\u5EA6\u4E0D\u4F1A\u5411\u672C\u4F1A\u8BDD\u8C03\u7528\u6A21\u578B\uFF1B\u8BF7\u52FF\u76F4\u63A5\u5411\u672C\u4F1A\u8BDD\u53D1\u9001\u8BAE\u9898\u3002`
+          note: `\u8FD9\u662F\u201C${room.title}\u201D\u7684\u8BA8\u8BBA\u5BA4\u4F1A\u8BDD\u7EC4\u3002\u6210\u5458\u4F1A\u8BDD\u663E\u793A\u5728\u672C\u4F1A\u8BDD\u4E0B\u65B9\uFF0C\u4E5F\u53EF\u4EE5\u4ECE\u201C\u591A\u667A\u80FD\u4F53\u8BA8\u8BBA\u5BA4\u201D\u9875\u9762\u4E2D\u7684\u6210\u5458\u201C\u4F1A\u8BDD\u201D\u6309\u94AE\u76F4\u63A5\u6253\u5F00\u3002\u623F\u95F4\u81EA\u52A8\u8C03\u5EA6\u4E0D\u4F1A\u5411\u672C\u4F1A\u8BDD\u8C03\u7528\u6A21\u578B\uFF1B\u8BF7\u52FF\u76F4\u63A5\u5411\u672C\u4F1A\u8BDD\u53D1\u9001\u8BAE\u9898\u3002`
         };
       }
       for (const member of this.store.agents(roomId)) {
@@ -10944,7 +10948,7 @@ var RoomEngine = class {
         const metadata = {
           discussionRoomId: roomId,
           discussionMemberId: member.id,
-          ...rootReady ? { openchamber: { kind: "workflow-agent", parentID: room.root_session_id } } : {}
+          ...rootReady ? { openchamber: { kind: "operator-child", parentID: room.root_session_id } } : {}
         };
         const title = `${room.title} \xB7 ${member.display_name}`;
         if (member.session_id && !member.session_linked && rootReady) {
@@ -11091,7 +11095,7 @@ var RoomEngine = class {
 };
 
 // src/service/main.mjs
-var VERSION = "0.1.1";
+var VERSION = "0.1.2";
 var MAX_BODY = 1024 * 1024;
 function packageRoot() {
   return resolve(fileURLToPath(new URL("../", import.meta.url)));

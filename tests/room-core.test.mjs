@@ -39,7 +39,7 @@ function setup({ budgetLimit = 50, filename = ":memory:", memberCount = 3 } = {}
     if (job.type === "create-session") {
       assert.equal(job.directory, root);
       assert.ok(job.permissions.some(rule => rule.action === "question" && rule.effect === "deny"));
-      assert.equal(job.metadata.openchamber.kind, "workflow-agent");
+      assert.equal(job.metadata.openchamber.kind, "operator-child");
       assert.equal(job.metadata.openchamber.parentID, store.room(roomId).root_session_id);
       statuses.set(job.sessionId, "idle");
     }
@@ -115,8 +115,41 @@ test("room root session is a model-free sidebar container and members link to it
   const memberJob = engine.nextJob();
   assert.equal(memberJob.type, "create-session");
   assert.equal(memberJob.parentID, undefined);
-  assert.deepEqual(memberJob.metadata.openchamber, { kind: "workflow-agent", parentID: rootJob.sessionId });
+  assert.deepEqual(memberJob.metadata.openchamber, { kind: "operator-child", parentID: rootJob.sessionId });
   assert.equal(store.room(room.roomId).root_creation_status, "ready");
+});
+
+test("schema 6 migration re-links existing member sessions as visible operator children", async () => {
+  const filename = join(scratch(), "rooms.sqlite");
+  const legacy = new RoomStore(filename);
+  const engine = new RoomEngine(legacy);
+  const room = engine.createRoom({ projectDir: scratch(), tempRoot: scratch(), members: [
+    { role: "generic", model: { providerID: "p", id: "a" } },
+    { role: "reviewer", model: { providerID: "p", id: "b" } },
+  ] });
+  legacy.db.prepare("UPDATE rooms SET root_session_id='ses_legacy_root',root_creation_status='ready' WHERE id=?").run(room.roomId);
+  for (const member of legacy.agents(room.roomId)) {
+    legacy.db.prepare("UPDATE members SET session_id=?,creation_status='ready',instructions_added=1,session_linked=1 WHERE id=?").run(`ses_legacy_${member.id}`, member.id);
+  }
+  legacy.db.prepare("UPDATE meta SET value='5' WHERE key='schema'").run();
+  legacy.close();
+
+  const upgraded = new RoomStore(filename);
+  try {
+    assert.equal(upgraded.db.prepare("SELECT value FROM meta WHERE key='schema'").get().value, "6");
+    assert.ok(upgraded.agents(room.roomId).every(member => member.session_linked === 0));
+    const upgradedEngine = new RoomEngine(upgraded);
+    const rootRefresh = upgradedEngine.nextJob();
+    assert.equal(rootRefresh.type, "create-root-session");
+    assert.equal(rootRefresh.sessionId, "ses_legacy_root");
+    await upgradedEngine.jobResult(rootRefresh, { outcome: "accepted", sessionId: rootRefresh.sessionId });
+    for (const member of upgraded.agents(room.roomId)) {
+      const link = upgradedEngine.nextJob();
+      assert.equal(link.type, "link-session");
+      assert.equal(link.sessionId, `ses_legacy_${member.id}`);
+      assert.deepEqual(link.metadata.openchamber, { kind: "operator-child", parentID: "ses_legacy_root" });
+    }
+  } finally { upgraded.close(); }
 });
 
 test("room root creation failures back off and retry the same deterministic session", async () => {

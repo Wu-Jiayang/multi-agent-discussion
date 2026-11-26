@@ -81,7 +81,7 @@ test("HTTP service authenticates host/plugin separately and creates rooms withou
     const unauthenticated = await fetch(`http://127.0.0.1:${f.service.server.address().port}/health`);
     assert.equal(unauthenticated.status, 401);
     assert.equal(typeof (await f.call("GET", "/meta")).data.humanName, "string");
-    assert.equal((await f.call("GET", "/health")).data.version, "0.1.1");
+    assert.equal((await f.call("GET", "/health")).data.version, "0.1.2");
     assert.equal((await f.call("GET", "/plugin/work", null, true)).status, 200);
     assert.equal((await f.call("GET", "/rooms", null, true)).status, 404);
     await f.call("POST", "/plugin/catalog", { models: [{ providerID: "probe", id: "fake", name: "Fake" }] }, true);
@@ -101,7 +101,7 @@ test("HTTP service authenticates host/plugin separately and creates rooms withou
     assert.equal(jobs.filter(job => job.type === "put-instructions").length, 2);
     assert.equal(jobs.some(job => job.type === "submit-reminder"), false);
     const memberJobs = jobs.filter(job => job.type === "create-session");
-    assert.ok(memberJobs.every(job => job.metadata.openchamber.kind === "workflow-agent"));
+    assert.ok(memberJobs.every(job => job.metadata.openchamber.kind === "operator-child"));
     assert.ok(memberJobs.every(job => job.metadata.openchamber.parentID === created.rootSessionId));
     const room = (await f.call("GET", `/rooms/${created.roomId}`)).data;
     assert.equal(room.status, "ready");

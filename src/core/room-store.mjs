@@ -178,6 +178,10 @@ export class RoomStore {
     })) {
       if (!memberColumns.has(name)) this.db.exec(`ALTER TABLE members ADD COLUMN ${name} ${definition}`);
     }
+    if (previousSchema !== "6") {
+      this.db.exec("UPDATE members SET session_linked=0 WHERE kind='agent' AND session_id IS NOT NULL");
+      this.db.exec("UPDATE rooms SET root_creation_status='pending',root_creation_error='正在更新会话组说明',root_next_attempt_at=NULL WHERE status<>'ended' AND root_creation_status='ready' AND root_session_id IS NOT NULL");
+    }
     const presentationColumns = new Set(this.db.prepare("PRAGMA table_info(presentations)").all().map(row => row.name));
     if (!presentationColumns.has("observed_at")) this.db.exec("ALTER TABLE presentations ADD COLUMN observed_at TEXT");
     const periodColumns = new Set(this.db.prepare("PRAGMA table_info(budget_periods)").all().map(row => row.name));
@@ -195,7 +199,7 @@ export class RoomStore {
           WHERE budget_periods.room_id=rooms.id AND budget_periods.period=rooms.budget_period));
       `);
     }
-    this.db.prepare("INSERT INTO meta(key,value) VALUES('schema','5') ON CONFLICT(key) DO UPDATE SET value='5'").run();
+    this.db.prepare("INSERT INTO meta(key,value) VALUES('schema','6') ON CONFLICT(key) DO UPDATE SET value='6'").run();
   }
 
   close() { this.db.close(); }
