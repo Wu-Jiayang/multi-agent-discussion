@@ -100,7 +100,7 @@ function defaultName(role, index, rows) {
   for (let suffix = 2; rows.some((row, rowIndex) => rowIndex !== index && row.displayName === name); suffix += 1) name = `${base} ${suffix}`;
   return name;
 }
-function modelKey(model) { return model ? JSON.stringify([model.providerID, model.id]) : ""; }
+function modelKey(model) { return model ? JSON.stringify([model.providerID, model.id, model.variant || ""]) : ""; }
 function modelOptions(selected) {
   const providers = [...new Set(state.models.map(model => model.providerID))];
   return `<option value="" ${selected ? "" : "selected"}>请选择模型</option>` + providers.map(provider => `<optgroup label="${escape(provider)}">${state.models.filter(model => model.providerID === provider).map(model => `<option value="${escape(modelKey(model))}" ${selected === modelKey(model) ? "selected" : ""}>${escape(model.name)}${model.variant ? ` (${escape(model.variant)})` : ""}</option>`).join("")}</optgroup>`).join("");
@@ -197,7 +197,7 @@ function renderRoomHeader() {
   if (!room) return;
   const paused = room.status === "paused";
   $("#room-header").innerHTML = `
-    <div><div class="room-title">${escape(room.title)}</div><div class="member-list"><span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">人类 · 房主</span></span>${room.members.map(member => `<span class="member-chip"><span>${escape(member.displayName)}</span>${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">创建失败：${escape(member.creationError || member.taskError || "未知原因")}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">会话</button>` : ""}</span>`).join("")}</div></div>
+    <div><div class="room-title">${escape(room.title)}</div><div class="member-list"><span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">人类 · 房主</span></span>${room.members.map(member => `<span class="member-chip"><span>${escape(member.displayName)}</span>${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">创建失败：${escape(member.creationError || "未知原因")}</span>` : member.taskError ? `<span class="pill waiting-human">指令同步失败：${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">会话</button>` : ""}</span>`).join("")}</div></div>
     <div class="room-controls">
       <span class="pill budget">余额 ${room.budget.remaining}/${room.budget.limit} · 第 ${room.budget.period} 段</span>
       ${room.status === "creating" ? `<button class="button secondary" data-action="retry">重试缺失会话</button>` : room.status !== "ended" ? `${paused ? `<button class="button primary" data-action="resume">继续房间</button>` : `<button class="button secondary" data-action="pause">暂停唤醒</button>`}<button class="button ghost danger" data-action="end">结束房间</button>` : ""}

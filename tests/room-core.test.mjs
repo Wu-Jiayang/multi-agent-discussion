@@ -381,6 +381,10 @@ test("a reminder can only be reserved once", async () => {
   assert.ok(store.reserveReminder(reminder.id));
   assert.equal(store.reserveReminder(reminder.id), null);
   assert.equal(store.room(roomId).budget_remaining, 49);
+  store.recoverExpiredReminders();
+  assert.equal(store.db.prepare("SELECT status FROM reminders WHERE id=?").get(reminder.id).status, "unknown");
+  assert.ok(store.reserveReminder(reminder.id));
+  assert.equal(store.room(roomId).budget_remaining, 49);
 });
 
 test("dispatch recovers an expired submitting lease without a separate scan", async () => {
@@ -412,6 +416,7 @@ test("instruction refresh failures on ready members are visible and back off", a
   assert.equal(job.type, "put-instructions");
   await engine.jobResult(job, { outcome: "failed", error: "temporary instruction error" });
   assert.match(store.member(job.memberId).task_error, /temporary instruction error/);
+  assert.equal(store.member(job.memberId).creation_error, null);
   assert.ok(store.member(job.memberId).next_attempt_at);
 });
 

@@ -35,7 +35,7 @@ dom=new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html'
       if(message.type==='service-request'){
         const p=message.payload;let data={};
         if(p.path==='/meta')data={humanName:'房主'};
-        else if(p.path.startsWith('/models'))data={models:[{providerID:'probe',id:'a',name:'模型 A'},{providerID:'probe',id:'b',name:'模型 B'}]};
+        else if(p.path.startsWith('/models'))data={models:[{providerID:'probe',id:'a',name:'模型 A',variant:'high'},{providerID:'probe',id:'b',name:'模型 B'}]};
         else if(p.path==='/rooms')data={rooms:[room]};
         else if(p.path==='/rooms/'+room.roomId+'')data=room;
         else if(p.path==='/rooms/'+room.roomId+'/timeline')data={items:messages,previousCursor:null,nextCursor:null};
@@ -71,6 +71,7 @@ assert.ok(document.querySelector('#question-list').textContent.includes('第二�
 document.querySelector('#new-room').click();
 await waitFor(()=>!document.querySelector('#create-view').hidden,'create view');
 assert.equal(document.querySelectorAll('.agent-editor').length,2);
+assert.ok([...document.querySelector('.agent-editor select[data-field="model"]').options].some(option=>option.value===JSON.stringify(['probe','a','high'])));
 const role=document.querySelector('.agent-editor select[data-field="role"]');role.value='proposer';role.dispatchEvent(new window.Event('change',{bubbles:true}));
 assert.equal(document.querySelector('.agent-editor input[data-field="displayName"]').value,'提案者');
 document.querySelector('[data-action="add-agent"]').click();assert.equal(document.querySelectorAll('.agent-editor').length,3);

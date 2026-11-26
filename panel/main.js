@@ -2122,7 +2122,7 @@ ${GUEST_UI_LOOK_CSS}`;
     return name;
   }
   function modelKey(model) {
-    return model ? JSON.stringify([model.providerID, model.id]) : "";
+    return model ? JSON.stringify([model.providerID, model.id, model.variant || ""]) : "";
   }
   function modelOptions(selected) {
     const providers = [...new Set(state.models.map((model) => model.providerID))];
@@ -2229,7 +2229,7 @@ ${GUEST_UI_LOOK_CSS}`;
     if (!room) return;
     const paused = room.status === "paused";
     $("#room-header").innerHTML = `
-    <div><div class="room-title">${escape(room.title)}</div><div class="member-list"><span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">\u4EBA\u7C7B \xB7 \u623F\u4E3B</span></span>${room.members.map((member) => `<span class="member-chip"><span>${escape(member.displayName)}</span>${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">\u521B\u5EFA\u5931\u8D25\uFF1A${escape(member.creationError || member.taskError || "\u672A\u77E5\u539F\u56E0")}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">\u4F1A\u8BDD</button>` : ""}</span>`).join("")}</div></div>
+    <div><div class="room-title">${escape(room.title)}</div><div class="member-list"><span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">\u4EBA\u7C7B \xB7 \u623F\u4E3B</span></span>${room.members.map((member) => `<span class="member-chip"><span>${escape(member.displayName)}</span>${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">\u521B\u5EFA\u5931\u8D25\uFF1A${escape(member.creationError || "\u672A\u77E5\u539F\u56E0")}</span>` : member.taskError ? `<span class="pill waiting-human">\u6307\u4EE4\u540C\u6B65\u5931\u8D25\uFF1A${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">\u4F1A\u8BDD</button>` : ""}</span>`).join("")}</div></div>
     <div class="room-controls">
       <span class="pill budget">\u4F59\u989D ${room.budget.remaining}/${room.budget.limit} \xB7 \u7B2C ${room.budget.period} \u6BB5</span>
       ${room.status === "creating" ? `<button class="button secondary" data-action="retry">\u91CD\u8BD5\u7F3A\u5931\u4F1A\u8BDD</button>` : room.status !== "ended" ? `${paused ? `<button class="button primary" data-action="resume">\u7EE7\u7EED\u623F\u95F4</button>` : `<button class="button secondary" data-action="pause">\u6682\u505C\u5524\u9192</button>`}<button class="button ghost danger" data-action="end">\u7ED3\u675F\u623F\u95F4</button>` : ""}

@@ -9603,10 +9603,12 @@ var RoomStore = class {
     this.db.prepare("UPDATE members SET next_attempt_at=NULL,task_error=NULL WHERE id=? AND room_id=?").run(memberId, roomId);
   }
   taskFailed(roomId, memberId, message, now = (/* @__PURE__ */ new Date()).toISOString()) {
-    const attempts = this.member(memberId).task_attempts;
+    const member = this.member(memberId);
+    const attempts = member.task_attempts;
     const delay = Math.min(6e4, 5e3 * Math.max(1, attempts));
     const retryAt = new Date(Date.parse(now) + delay).toISOString();
-    this.db.prepare("UPDATE members SET next_attempt_at=?,task_error=?,creation_error=? WHERE id=? AND room_id=?").run(retryAt, String(message).slice(0, 2e3), String(message).slice(0, 2e3), memberId, roomId);
+    const creationError = member.creation_status === "ready" ? member.creation_error : String(message).slice(0, 2e3);
+    this.db.prepare("UPDATE members SET next_attempt_at=?,task_error=?,creation_error=? WHERE id=? AND room_id=?").run(retryAt, String(message).slice(0, 2e3), creationError, memberId, roomId);
   }
   instructionsAdded(roomId, memberId) {
     this.member(memberId);
@@ -10246,6 +10248,7 @@ ${parse(row.options_json, []).map((option, index) => `${index + 1}. ${option}`).
     this.db.prepare("UPDATE reminders SET status='submitting',updated_at=?,lease_until=? WHERE id=?").run(now, leaseUntil, reminderId);
   }
   recoverExpiredReminders(now = (/* @__PURE__ */ new Date()).toISOString()) {
+    this.db.prepare("UPDATE reminders SET status='unknown',last_error='Unfinished reservation recovered; retry with the same input ID' WHERE status='reserved'").run();
     this.db.prepare("UPDATE reminders SET status='unknown',last_error='Submission lease expired; retry with the same input ID' WHERE status='submitting' AND lease_until<?").run(now);
   }
   ackReminder(reminderId, outcome, error = null, now = (/* @__PURE__ */ new Date()).toISOString()) {
