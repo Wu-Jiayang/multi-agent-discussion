@@ -95,7 +95,11 @@ export function createDiscussionService(options = {}) {
       headers: { authorization: `Bearer ${serviceToken}` },
       signal: AbortSignal.timeout(5000),
     });
-    if (!response.ok) throw new Error(`OpenCode read returned ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(`OpenCode read returned ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
     return response.json();
   }
 
@@ -125,6 +129,7 @@ export function createDiscussionService(options = {}) {
 
   engine = options.engine || new RoomEngine(store, {
     statusProvider, waitKinds,
+    rootSessionProvider: sessionID => opencode(`/api/session/${encodeURIComponent(sessionID)}`),
     onChange: event => {
       statusCache.clear();
       if (serviceHost) void serviceHost.emit("room:changed", event).catch(() => {});
@@ -206,7 +211,10 @@ export function createDiscussionService(options = {}) {
     if (req.method === "GET" && url.pathname === "/meta") return json(res, 200, { humanName: defaultHumanName() });
     if (req.method === "GET" && url.pathname === "/models") {
       const directory = query(url).directory;
-      return json(res, 200, { models: directory ? modelCatalogs.get(directory) || [] : models, unicode: UNICODE_IMPLEMENTATION, maxAgentWidth: MAX_AGENT_MESSAGE_WIDTH });
+      const scoped = directory ? modelCatalogs.get(directory) : undefined;
+      const catalog = scoped ?? models;
+      const source = catalog.length ? (scoped ? "project" : "global") : "empty";
+      return json(res, 200, { models: catalog, source, unicode: UNICODE_IMPLEMENTATION, maxAgentWidth: MAX_AGENT_MESSAGE_WIDTH });
     }
     if (req.method === "GET" && url.pathname === "/rooms") return json(res, 200, { rooms: engine.listRooms(query(url).projectDir || null) });
     if (req.method === "POST" && url.pathname === "/rooms") {

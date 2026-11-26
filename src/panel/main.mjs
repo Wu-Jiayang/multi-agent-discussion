@@ -1,11 +1,14 @@
 import { connectHost } from "@openchamber/sdk";
-import { applyHostReady } from "@openchamber/sdk/ui";
+import { applyHostReady, mountSelect } from "@openchamber/sdk/ui";
 
 const host = connectHost();
 const $ = selector => document.querySelector(selector);
 const app = $("#app");
 const state = {
-  directory: null, rooms: [], models: [], room: null, roomId: null, creating: false,
+  directory: null, projectDir: null, projectId: null, projectManual: false,
+  projects: [], projectsState: "loading", projectsError: null,
+  modelSource: null, modelError: null, modelsLoading: false, modelsForProject: undefined, modelsRequestGeneration: 0, contextGeneration: 0,
+  rooms: [], models: [], room: null, roomId: null, creating: false,
   createAgents: [], createHumanName: "房主", timeline: [], timelineCursor: null, timelineSignature: "",
   questions: [], questionStatus: "pending", questionSignature: "", questionFirstSignature: "", questionCursor: null, selectedQuestionId: null,
   chatAnchor: null, followLatest: true, search: "", author: "", replyTo: null,
@@ -17,6 +20,7 @@ const statusLabels = {
   idle: "空闲", running: "运行中", "waiting-human": "等待人工输入",
   "waiting-question": "等待原生提问", "waiting-permission": "等待权限确认", unknown: "状态未知／不可达",
 };
+const rootStatusLabels = { pending: "准备中", ready: "已就绪", failed: "创建失败" };
 
 function escape(value) {
   return String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
@@ -60,24 +64,232 @@ function renderRoomSelect() {
   select.value = state.roomId || "";
   $("#new-room").textContent = state.creating ? "取消新建" : "新建房间";
 }
-async function refreshModels(force = false) {
-  if (!state.directory || (!force && state.models.length)) return;
+
+let projectSelectHandle = null;
+let projectsLoaded = false;
+let projectsSubscribed = false;
+const modelHandles = new Map();
+let agentUid = 0;
+
+function projectOptions() {
+  const options = [];
+  const directories = new Set();
+  if (state.directory && !state.projects.some(project => project.directory === state.directory)) {
+    options.push({ id: "current-workspace", label: "当前工作区", hint: state.directory, directory: state.directory });
+    directories.add(state.directory);
+  }
+  for (const project of state.projects) {
+    if (!project || typeof project.directory !== "string" || directories.has(project.directory)) continue;
+    options.push({ id: project.id, label: project.name || project.directory, hint: project.directory, directory: project.directory });
+    directories.add(project.directory);
+  }
+  return options;
+}
+function resolveProjectSelection() {
+  const options = projectOptions();
+  let option = state.projectId ? options.find(item => item.id === state.projectId) : null;
+  if (!option && state.projectManual) state.projectManual = false;
+  if (!option) {
+    option = options.find(item => item.directory === state.projectDir)
+      || (state.directory ? options.find(item => item.directory === state.directory) : null)
+      || (state.directory ? options.find(item => item.id === "current-workspace") : null)
+      || null;
+  }
+  state.projectId = option?.id || null;
+  state.projectDir = option?.directory ?? state.directory ?? null;
+}
+function renderProjectHint() {
+  const el = $("#project-hint");
+  if (!el) return;
+  let text = "";
+  if (state.projectsState === "loading") text = "正在读取项目列表…";
+  else if (state.projectsState === "error") text = "项目列表读取失败，仍可使用当前工作区。";
+  el.textContent = text;
+  el.hidden = !text;
+}
+function updateProjectPicker() {
+  if (!projectSelectHandle) return;
+  const options = projectOptions();
+  const value = options.some(option => option.id === state.projectId) ? state.projectId : null;
+  projectSelectHandle.update({
+    options,
+    value,
+    disabled: state.projectsState === "loading",
+    placeholder: options.length ? "选择项目" : state.projectsState === "loading" ? "读取项目…" : "没有可用项目",
+  });
+  renderProjectHint();
+}
+function applyProjectsSnapshot(snapshot) {
+  if (snapshot?.state === "error") {
+    state.projectsState = "error";
+    state.projectsError = new Error("项目列表读取失败。");
+    updateProjectPicker();
+    return;
+  }
+  const previousDir = state.projectDir;
+  state.projectsState = snapshot?.state || "ready";
+  state.projectsError = null;
+  const nextProjects = Array.isArray(snapshot?.projects) ? snapshot.projects.filter(project => project && typeof project.id === "string" && typeof project.directory === "string") : [];
+  if (state.projectsState === "loading" && !nextProjects.length && state.projects.length) {
+    updateProjectPicker();
+    return;
+  }
+  state.projects = nextProjects;
+  resolveProjectSelection();
+  updateProjectPicker();
+  if (state.projectDir !== previousDir) void reloadProjectContext();
+}
+async function loadProjects() {
   try {
-    const catalog = await request("GET", "/models", null, { directory: state.directory });
-    const signature = JSON.stringify(catalog.models);
-    if (signature === JSON.stringify(state.models)) return;
-    state.models = catalog.models;
+    applyProjectsSnapshot(await host.listProjects());
+  } catch (error) {
+    state.projectsState = "error";
+    state.projectsError = error;
+    updateProjectPicker();
+  }
+}
+function subscribeProjects() {
+  if (projectsSubscribed) return;
+  projectsSubscribed = true;
+  host.onProjects(applyProjectsSnapshot).catch(error => {
+    state.projectsState = "error";
+    state.projectsError = error;
+    updateProjectPicker();
+  });
+}
+function mountProjectPicker() {
+  if (projectSelectHandle) return;
+  const root = $("#project-picker");
+  if (!root) return;
+  projectSelectHandle = mountSelect(root, {
+    label: "房间所属项目",
+    value: null,
+    options: [],
+    onChange: id => selectProject(id),
+    placeholder: "读取项目…",
+    searchable: true,
+    searchPlaceholder: "搜索项目",
+    disabled: true,
+  });
+  updateProjectPicker();
+}
+function selectProject(id) {
+  const option = projectOptions().find(item => item.id === id);
+  if (!option) return;
+  state.projectManual = true;
+  state.projectId = id;
+  const changed = state.projectDir !== option.directory;
+  state.projectDir = option.directory;
+  projectSelectHandle?.update({ value: id });
+  if (changed) void reloadProjectContext();
+  else updateProjectPicker();
+}
+
+function modelKey(model) { return model ? JSON.stringify([model.providerID, model.id, model.variant || ""]) : ""; }
+function modelSelectOptions() {
+  return state.models.map(model => ({
+    id: modelKey(model),
+    label: `${model.providerName || model.providerID || "未知提供商"} · ${model.name || model.id}${model.variant ? ` (${model.variant})` : ""}`,
+    hint: model.providerID || "",
+  }));
+}
+function normalizeModelSource(source, models) {
+  if (source === "project" || source === "global" || source === "empty") return source;
+  return models.length ? (state.projectDir ? "project" : "global") : "empty";
+}
+function renderModelSourceHint() {
+  const el = $("#model-source-hint");
+  if (!el) return;
+  let text = "";
+  let retry = false;
+  if (state.modelsLoading) text = "正在读取模型目录…";
+  else if (state.modelError) { text = `模型目录读取失败：${state.modelError.message || state.modelError}`; retry = true; }
+  else if (state.modelSource === "global") text = "该项目模型目录尚未加载，当前显示全局目录；创建时会按项目配置校验。";
+  else if (state.modelSource === "empty") { text = state.projectDir ? "该项目暂无可用模型目录。" : "尚未读取到可用模型目录。"; retry = true; }
+  else if (!state.projectDir) text = "尚未选择项目，将使用全局模型目录。";
+  el.classList.toggle("warning", retry);
+  el.innerHTML = text ? `${escape(text)}${retry ? ` <button class="button ghost" data-action="retry-models">重试</button>` : ""}` : "";
+  el.hidden = !text;
+}
+function disposeModelHandles() {
+  for (const handle of modelHandles.values()) handle.dispose();
+  modelHandles.clear();
+}
+function mountCreateModelPickers() {
+  for (const root of document.querySelectorAll("#agent-rows [data-model-picker]")) {
+    const row = state.createAgents[Number(root.dataset.modelPicker)];
+    if (!row) continue;
+    let handle;
+    handle = mountSelect(root, {
+      label: "模型",
+      value: row.modelKey || null,
+      options: modelSelectOptions(),
+      onChange: id => {
+        const current = state.createAgents.find(item => item.uid === row.uid);
+        if (!current) return;
+        current.modelKey = id;
+        handle.update({ value: id });
+        updateCreateActions();
+      },
+      placeholder: "请选择模型",
+      searchable: true,
+      searchPlaceholder: "搜索模型或提供商",
+      disabled: !state.models.length,
+    });
+    modelHandles.set(row.uid, handle);
+  }
+}
+function syncCreateModelPickers() {
+  if (!$("#agent-rows") || $("#create-view").hidden) return;
+  for (const [uid, handle] of modelHandles) {
+    const row = state.createAgents.find(item => item.uid === uid);
+    if (!row) continue;
+    handle.update({ options: modelSelectOptions(), value: row.modelKey || null, disabled: !state.models.length });
+  }
+  updateCreateActions();
+  renderModelSourceHint();
+}
+function updateCreateActions() {
+  const button = $("#create-actions")?.querySelector('[data-action="create-room"]');
+  if (!button) return;
+  button.disabled = !state.models.length || !state.projectDir || state.modelsLoading || state.createAgents.some(row => !row.modelKey);
+}
+function validateCreateModels() {
+  if (!state.createAgents.length) { resetCreateAgents(); return; }
+  const available = new Set(state.models.map(modelKey));
+  const missing = state.createAgents.some(row => row.modelKey && !available.has(row.modelKey));
+  if (!missing) return;
+  for (const row of state.createAgents) if (row.modelKey && !available.has(row.modelKey)) row.modelKey = "";
+  showError(new Error("模型目录已变化，请重新选择受影响的成员模型。"));
+}
+async function refreshModels(force = false, generation = state.contextGeneration) {
+  if (!force && !state.modelsLoading && state.modelsForProject === state.projectDir && (state.models.length || state.modelSource)) return;
+  const requestGeneration = ++state.modelsRequestGeneration;
+  state.modelsLoading = true;
+  state.modelError = null;
+  renderModelSourceHint();
+  try {
+    const catalog = await request("GET", "/models", null, state.projectDir ? { directory: state.projectDir } : null);
+    if (generation !== state.contextGeneration || requestGeneration !== state.modelsRequestGeneration) return;
+    state.models = Array.isArray(catalog?.models) ? catalog.models : [];
+    state.modelsForProject = state.projectDir;
+    state.modelSource = normalizeModelSource(catalog?.source, state.models);
+    state.modelsLoading = false;
+    validateCreateModels();
     if (!state.createAgents.length) resetCreateAgents();
-    else {
-      const available = new Set(state.models.map(modelKey));
-      const missing = state.createAgents.some(row => row.modelKey && !available.has(row.modelKey));
-      if (missing) {
-        for (const row of state.createAgents) if (!available.has(row.modelKey)) row.modelKey = "";
-        showError(new Error("模型目录已变化，请重新选择受影响的成员模型。"));
-      }
-    }
-    if (state.creating) renderCreate();
-  } catch (error) { showError(error); }
+    syncCreateModelPickers();
+  } catch (error) {
+    if (generation !== state.contextGeneration || requestGeneration !== state.modelsRequestGeneration) return;
+    state.models = [];
+    state.modelsForProject = state.projectDir;
+    state.modelsLoading = false;
+    state.modelSource = "empty";
+    state.modelError = error;
+    validateCreateModels();
+    syncCreateModelPickers();
+    showError(error);
+  }
+  renderModelSourceHint();
 }
 function showCreate() {
   state.creating = true;
@@ -100,16 +312,12 @@ function defaultName(role, index, rows) {
   for (let suffix = 2; rows.some((row, rowIndex) => rowIndex !== index && row.displayName === name); suffix += 1) name = `${base} ${suffix}`;
   return name;
 }
-function modelKey(model) { return model ? JSON.stringify([model.providerID, model.id, model.variant || ""]) : ""; }
-function modelOptions(selected) {
-  const providers = [...new Set(state.models.map(model => model.providerID))];
-  return `<option value="" ${selected ? "" : "selected"}>请选择模型</option>` + providers.map(provider => `<optgroup label="${escape(provider)}">${state.models.filter(model => model.providerID === provider).map(model => `<option value="${escape(modelKey(model))}" ${selected === modelKey(model) ? "selected" : ""}>${escape(model.name)}${model.variant ? ` (${escape(model.variant)})` : ""}</option>`).join("")}</optgroup>`).join("");
-}
 function renderCreate() {
+  disposeModelHandles();
   const preset = state.createPreset || "generic";
   $("#create-view").innerHTML = `
     <h1>新建讨论室</h1>
-    <p class="intro">为每个角色创建独立 OpenCode 会话。确认前可改显示名；建房本身不会调用模型。</p>
+    <p class="intro">每个房间创建一个根会话；成员会话不显示在侧栏，可从成员“会话”按钮打开。建房本身不会调用模型。</p>
     <div class="form-grid">
       <div class="field"><label>房间名称</label><input id="create-title" value="${escape(state.createTitle || "新的讨论室")}" maxlength="120"></div>
       <div class="field"><label>预设</label><select id="create-preset"><option value="generic" ${preset === "generic" ? "selected" : ""}>普通讨论</option><option value="debate" ${preset === "debate" ? "selected" : ""}>双模型辩论</option></select></div>
@@ -117,41 +325,70 @@ function renderCreate() {
     </div>
     ${preset === "debate" ? `<div class="warning">双模型辩论预设共享 12 次自动唤醒。初始立场会写进会话指令，允许随证据修改。</div>` : ""}
     <div id="agent-rows">${state.createAgents.map((row, index) => `
-      <div class="agent-editor" data-agent="${index}">
+      <div class="agent-editor" data-agent="${index}" data-agent-uid="${escape(row.uid)}">
         <div class="agent-title"><strong>成员 ${index + 1}</strong><button class="button ghost danger" data-action="remove-agent" ${state.createAgents.length <= 2 ? "disabled" : ""}>移除</button></div>
         <div class="agent-fields">
           <div class="field"><label>显示名</label><input data-field="displayName" value="${escape(row.displayName)}" maxlength="80"></div>
           <div class="field"><label>角色</label><select data-field="role">${Object.entries(roleLabels).map(([value, label]) => `<option value="${value}" ${row.role === value ? "selected" : ""}>${label}</option>`).join("")}</select></div>
-          <div class="field"><label>模型</label><select data-field="model">${state.models.length ? modelOptions(row.modelKey) : `<option>正在读取可用模型…</option>`}</select></div>
+          <div class="field model-picker" data-model-picker="${index}"></div>
         </div>
       </div>`).join("")}</div>
     <button class="button secondary" data-action="add-agent">添加成员</button>
-    <div class="warning">新会话使用当前项目工作区，默认完全执行权限，并在会话级禁用原生提问工具。多个 Agent 同时写同一工作区可能互相覆盖文件；讨论文档请写房间临时目录。不会修改全局权限，不创建 worktree。</div>
-    <div class="create-actions"><button class="button primary" data-action="create-room" ${!state.models.length || !state.directory || state.createAgents.some(row => !row.modelKey) ? "disabled" : ""}>创建房间</button><button class="button secondary" data-action="cancel-create">取消</button></div>
-    ${!state.directory ? `<p class="intro">请先在 OpenChamber 打开一个项目。</p>` : ""}
+    <div class="warning">新会话使用所选项目工作区，默认完全执行权限，并在会话级禁用原生提问工具。多个 Agent 同时写同一工作区可能互相覆盖文件；讨论文档请写房间临时目录。不会修改全局权限，不创建 worktree。</div>
+    <div id="model-source-hint" class="model-source-hint" hidden></div>
+    <div id="create-actions" class="create-actions"><button class="button primary" data-action="create-room" disabled>创建房间</button><button class="button secondary" data-action="cancel-create">取消</button></div>
+    ${!state.projectDir ? `<p class="intro">请先选择房间所属项目。</p>` : ""}
   `;
+  mountCreateModelPickers();
+  updateCreateActions();
+  renderModelSourceHint();
+}
+function newAgentRow(model) {
+  return { uid: `agent-${++agentUid}`, role: "generic", displayName: "", modelKey: modelKey(model), autoName: true };
 }
 function resetCreateAgents() {
   state.createPreset = "generic";
   state.createTitle = "新的讨论室";
-  state.createAgents = [0, 1].map(index => ({ role: "generic", displayName: `Agent ${index + 1}`, modelKey: modelKey(state.models[Math.min(index, Math.max(0, state.models.length - 1))]), autoName: true }));
+  state.createAgents = [0, 1].map(index => {
+    const row = newAgentRow(state.models[index] || state.models[0] || null);
+    row.displayName = `Agent ${index + 1}`;
+    return row;
+  });
 }
 
-async function loadRooms(preferred) {
-  const data = await request("GET", "/rooms", null, { projectDir: state.directory });
+async function reloadProjectContext() {
+  const generation = ++state.contextGeneration;
+  state.pendingView = null;
+  state.rooms = []; state.room = null; state.roomId = null;
+  state.timeline = []; state.timelineCursor = null; state.timelineSignature = "";
+  state.questions = []; state.questionSignature = ""; state.questionFirstSignature = ""; state.questionCursor = null;
+  state.selectedQuestionId = null; state.chatAnchor = null; state.followLatest = true;
+  state.models = []; state.modelsForProject = undefined; state.modelSource = null; state.modelError = null; state.modelsLoading = false;
+  renderRoomSelect();
+  $("#room-view").hidden = true;
+  if (!state.creating) {
+    $("#create-view").hidden = false;
+    renderCreate();
+  }
+  if (!state.projectDir) { await refreshModels(true, generation); return; }
+  await Promise.all([refreshModels(true, generation), loadRooms(null, generation)]);
+}
+async function loadRooms(preferred, generation = state.contextGeneration) {
+  const data = await request("GET", "/rooms", null, { projectDir: state.projectDir });
+  if (generation !== state.contextGeneration) return;
   state.rooms = data.rooms;
   const requested = preferred || state.roomId;
   let next = state.rooms.some(room => room.roomId === requested) ? requested : state.rooms[0]?.roomId || null;
   if (state.creating) next = null;
   renderRoomSelect();
-  if (next && state.rooms.some(room => room.roomId === next)) await selectRoom(next, state.pendingView);
+  if (next && state.rooms.some(room => room.roomId === next)) await selectRoom(next, state.pendingView, generation);
   else if (!state.creating) {
     state.room = null; state.roomId = null;
     $("#create-view").hidden = false; $("#room-view").hidden = true;
     renderCreate();
   }
 }
-async function selectRoom(roomId, restore = null) {
+async function selectRoom(roomId, restore = null, generation = state.contextGeneration) {
   if (!roomId) return;
   const view = restore?.roomId === roomId ? restore : null;
   state.roomId = roomId;
@@ -170,8 +407,10 @@ async function selectRoom(roomId, restore = null) {
   $("#history-search").value = state.search;
   renderRoomSelect();
   await Promise.all([refreshRoom(), loadQuestions()]);
+  if (generation !== state.contextGeneration) return;
   if (state.chatAnchor) await loadTimeline(false, null, state.chatAnchor);
   else await loadTimeline(true);
+  if (generation !== state.contextGeneration) return;
   if (view?.questionScroll) $("#question-list").scrollTop = view.questionScroll;
   if (view?.chatScroll) $("#timeline").scrollTop = view.chatScroll;
   renderComposer();
@@ -181,7 +420,10 @@ async function selectRoom(roomId, restore = null) {
 
 async function refreshRoom() {
   if (!state.roomId) return;
-  state.room = await request("GET", `/rooms/${encodeURIComponent(state.roomId)}`);
+  const roomId = state.roomId;
+  const room = await request("GET", `/rooms/${encodeURIComponent(roomId)}`);
+  if (state.roomId !== roomId) return;
+  state.room = room;
   renderRoomHeader();
   renderAuthorFilter();
   const ready = state.room.status === "ready";
@@ -196,12 +438,16 @@ function renderRoomHeader() {
   const room = state.room;
   if (!room) return;
   const paused = room.status === "paused";
+  const rootStatus = room.rootCreationStatus;
+  const rootPill = rootStatus === "ready" ? "running" : rootStatus === "failed" ? "unknown" : "waiting-human";
+  const rootChip = rootStatus || room.rootSessionId ? `<span class="member-chip root-session"><span>根会话</span>${rootStatus ? `<span class="pill ${rootPill}">${escape(rootStatusLabels[rootStatus] || rootStatus)}</span>` : ""}${room.rootSessionId ? `<button data-action="open-root-session" data-session="${escape(room.rootSessionId)}">会话组</button>` : ""}</span>` : "";
   $("#room-header").innerHTML = `
-    <div><div class="room-title">${escape(room.title)}</div><div class="member-list"><span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">人类 · 房主</span></span>${room.members.map(member => `<span class="member-chip"><span>${escape(member.displayName)}</span>${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">创建失败：${escape(member.creationError || "未知原因")}</span>` : member.taskError ? `<span class="pill waiting-human">指令同步失败：${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">会话</button>` : ""}</span>`).join("")}</div></div>
+    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">人类 · 房主</span></span>${room.members.map(member => `<span class="member-chip"><span>${escape(member.displayName)}</span>${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">创建失败：${escape(member.creationError || "未知原因")}</span>` : member.taskError ? `<span class="pill waiting-human">指令同步失败：${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">会话</button>` : ""}</span>`).join("")}</div></div>
     <div class="room-controls">
       <span class="pill budget">余额 ${room.budget.remaining}/${room.budget.limit} · 第 ${room.budget.period} 段</span>
       ${room.status === "creating" ? `<button class="button secondary" data-action="retry">重试缺失会话</button>` : room.status !== "ended" ? `${paused ? `<button class="button primary" data-action="resume">继续房间</button>` : `<button class="button secondary" data-action="pause">暂停唤醒</button>`}<button class="button ghost danger" data-action="end">结束房间</button>` : ""}
     </div>
+    ${rootStatus === "failed" ? `<div class="root-error">根会话创建失败：${escape(room.rootCreationError || "未知原因")}</div>` : ""}
     ${paused && room.status !== "creating" ? `<div class="composer-hint">自动唤醒已暂停（${escape(room.pausedReason === "budget" ? "额度用尽" : "手动暂停")}）。发帖、阅读和提问仍可使用。</div>` : ""}
   `;
 }
@@ -263,9 +509,11 @@ function renderTimeline() {
 }
 async function loadTimeline(initial = false, cursor = null, contextId = null) {
   if (!state.roomId) return;
+  const roomId = state.roomId;
   let data;
-  if (contextId) data = await request("GET", `/rooms/${encodeURIComponent(state.roomId)}/messages/${encodeURIComponent(contextId)}/context`, null, { before: 5, after: 8 });
-  else data = await request("GET", `/rooms/${encodeURIComponent(state.roomId)}/timeline`, null, { cursor, limit: 50, query: state.search, authorMemberId: state.author });
+  if (contextId) data = await request("GET", `/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(contextId)}/context`, null, { before: 5, after: 8 });
+  else data = await request("GET", `/rooms/${encodeURIComponent(roomId)}/timeline`, null, { cursor, limit: 50, query: state.search, authorMemberId: state.author });
+  if (state.roomId !== roomId) return;
   const signature = JSON.stringify(data.items);
   if (!cursor && !contextId && signature === state.timelineSignature && !initial) return;
   state.timelineSignature = signature;
@@ -342,7 +590,9 @@ async function sendMessage() {
 
 async function loadQuestions(append = false) {
   if (!state.roomId) return;
-  const data = await request("GET", `/rooms/${encodeURIComponent(state.roomId)}/questions`, null, { status: state.questionStatus, limit: 50, cursor: append ? state.questionCursor : null });
+  const roomId = state.roomId;
+  const data = await request("GET", `/rooms/${encodeURIComponent(roomId)}/questions`, null, { status: state.questionStatus, limit: 50, cursor: append ? state.questionCursor : null });
+  if (state.roomId !== roomId) return;
   const signature = JSON.stringify(data.items);
   if (!append && signature === state.questionFirstSignature) return;
   if (append) {
@@ -459,10 +709,12 @@ app.addEventListener("click", async event => {
   const action = button.dataset.action;
   if (action === "select-question" && event.target.closest("form,button,select,textarea,input")) return;
   if (action === "cancel-create") { if (state.rooms[0]) { hideCreate(); await selectRoom(state.rooms[0].roomId); } else showCreate(); return; }
+  if (action === "retry-models") { void refreshModels(true); return; }
   if (action === "add-agent" && state.createAgents.length < 8) {
     const index = state.createAgents.length;
-    state.createAgents.push({ role: "generic", displayName: "", modelKey: modelKey(state.models[0]), autoName: true });
-    state.createAgents[index].displayName = defaultName("generic", index, state.createAgents);
+    const row = newAgentRow(state.models[0] || null);
+    state.createAgents.push(row);
+    row.displayName = defaultName("generic", index, state.createAgents);
     renderCreate(); return;
   }
   if (action === "remove-agent") { state.createAgents.splice(Number(button.closest("[data-agent]").dataset.agent), 1); renderCreate(); return; }
@@ -474,10 +726,10 @@ app.addEventListener("click", async event => {
         if (!model) throw new Error("请为每个成员选择有效模型。");
         return { role: row.role, displayName: row.displayName.trim(), model };
       });
-      const room = await request("POST", "/rooms", { projectDir: state.directory, title: $("#create-title").value, preset: $("#create-preset").value, humanName: $("#create-human").value, members });
+      const room = await request("POST", "/rooms", { projectDir: state.projectDir, title: $("#create-title").value, preset: $("#create-preset").value, humanName: $("#create-human").value, members });
       state.creating = false;
       await loadRooms(room.roomId);
-      toast("房间已创建，正在准备独立会话。", "success");
+      toast("房间已创建，正在准备根会话和成员会话。", "success");
     } catch (error) { showError(error); }
     return;
   }
@@ -491,7 +743,7 @@ app.addEventListener("click", async event => {
     } catch (error) { showError(error); }
     return;
   }
-  if (action === "open-session") { persistView(); await host.openSession(button.dataset.session); return; }
+  if (action === "open-session" || action === "open-root-session") { persistView(); await host.openSession(button.dataset.session); return; }
   if (action === "reply") {
     const message = state.timeline.find(item => item.messageId === button.dataset.message);
     state.replyTo = message; renderComposerChips(); $("#composer-text")?.focus(); return;
@@ -572,18 +824,9 @@ document.addEventListener("keydown", event => { if (event.key === "Escape") hide
 
 let refreshTimer = 0;
 async function refreshOpenRoom() {
-  if (!state.directory || document.hidden) return;
+  if (document.hidden || (!state.projectDir && !state.roomId)) return;
   clearTimeout(refreshTimer);
-  if (!state.models.length) {
-    try {
-      const catalog = await request("GET", "/models", null, { directory: state.directory });
-      if (catalog.models.length) {
-        state.models = catalog.models;
-        if (!state.createAgents.length) resetCreateAgents();
-        if (state.creating) renderCreate();
-      }
-    } catch {}
-  }
+  if (!state.models.length && !state.modelsLoading && state.modelsForProject !== state.projectDir) await refreshModels(false);
   if (!state.roomId || state.creating) return;
   refreshTimer = setTimeout(async () => {
     try {
@@ -599,30 +842,50 @@ host.onServiceEvent(event => {
 });
 setInterval(() => void refreshOpenRoom(), 1800);
 
+mountProjectPicker();
+
 let readyGeneration = 0;
 host.onReady(async ctx => {
   applyHostReady(ctx, document.documentElement);
   const generation = ++readyGeneration;
-  if (ctx.directory !== state.directory) {
-    state.directory = ctx.directory;
-    state.roomId = null;
-    state.rooms = [];
-    if (ctx.directory) {
-      try {
-        const saved = await host.storage.get("discussion-view");
-        if (saved?.roomId) { state.roomId = saved.roomId; state.pendingView = saved; }
-        if (saved?.questionStatus) state.questionStatus = saved.questionStatus;
-        if (saved?.mobilePane) state.mobilePane = saved.mobilePane;
-        const [catalog, meta] = await Promise.all([
-          request("GET", "/models", null, { directory: state.directory }),
-          request("GET", "/meta"),
-        ]);
-        state.createHumanName = meta.humanName || state.createHumanName;
-        state.models = catalog.models;
-        if (!state.createAgents.length) resetCreateAgents();
-        await loadRooms();
-      } catch (error) { showError(error); }
+  const directoryChanged = ctx.directory !== state.directory;
+  const previousProjectDir = state.projectDir;
+  state.directory = ctx.directory;
+  mountProjectPicker();
+  if (!projectsLoaded) {
+    projectsLoaded = true;
+    subscribeProjects();
+    void loadProjects();
+  }
+  if (directoryChanged) {
+    if (!state.projectManual) { state.projectDir = ctx.directory; state.projectId = null; }
+    else if (state.projectId === "current-workspace") state.projectDir = ctx.directory;
+    resolveProjectSelection();
+    updateProjectPicker();
+  }
+  if (state.projectDir === previousProjectDir) return;
+  const context = ++state.contextGeneration;
+  state.roomId = null; state.rooms = []; state.pendingView = null;
+  if (state.projectDir) {
+    try {
+      const saved = await host.storage.get("discussion-view");
+      if (generation !== readyGeneration || context !== state.contextGeneration) return;
+      if (saved?.roomId) { state.roomId = saved.roomId; state.pendingView = saved; }
+      if (saved?.questionStatus) state.questionStatus = saved.questionStatus;
+      if (saved?.mobilePane) state.mobilePane = saved.mobilePane;
+      const meta = await request("GET", "/meta");
+      if (generation !== readyGeneration || context !== state.contextGeneration) return;
+      state.createHumanName = meta.humanName || state.createHumanName;
+    } catch (error) { showError(error); }
+    if (generation !== readyGeneration || context !== state.contextGeneration) return;
+    await Promise.all([refreshModels(true, context), loadRooms(null, context)]);
+  } else {
+    await refreshModels(true, context);
+    if (generation !== readyGeneration || context !== state.contextGeneration) return;
+    if (!state.creating) {
+      $("#create-view").hidden = false;
+      $("#room-view").hidden = true;
+      renderCreate();
     }
   }
-  if (generation !== readyGeneration) return;
 });

@@ -173,7 +173,30 @@ var index_default = {
     async function executeJob(job) {
       let result;
       try {
-        if (job.type === "create-session") {
+        if (job.type === "create-root-session") {
+          const created = await ctx.session.create({
+            id: job.sessionId,
+            title: job.title,
+            location: { directory: job.directory },
+            metadata: job.metadata
+          });
+          if (created.metadata?.discussionRoomId !== job.roomId || created.metadata?.discussionRoot !== true) {
+            throw new Error("The deterministic room root session ID belongs to different discussion metadata");
+          }
+          try {
+            await ctx.session.synthetic({
+              sessionID: created.id,
+              id: `msg_discussion_root_${job.roomId}`,
+              text: job.note,
+              description: "\u591A\u667A\u80FD\u4F53\u8BA8\u8BBA\u5BA4\u4F1A\u8BDD\u7EC4",
+              resume: false,
+              metadata: { source: "multi-agent-discussion-root", discussionRoomId: job.roomId }
+            });
+          } catch (error) {
+            if (error?.code !== "CONFLICT") console.error("Discussion root note failed", error.message);
+          }
+          result = { outcome: "accepted", sessionId: created.id };
+        } else if (job.type === "create-session") {
           const model = { providerID: job.model.providerID, id: job.model.id };
           if (job.model.variant) model.variant = job.model.variant;
           const created = await ctx.session.create({
@@ -188,6 +211,15 @@ var index_default = {
             throw new Error("The deterministic session ID belongs to different discussion metadata");
           }
           result = { outcome: "accepted", sessionId: created.id };
+        } else if (job.type === "link-session") {
+          const existing = await ctx.session.get({ sessionID: job.sessionId });
+          const metadata = {
+            ...existing.metadata,
+            ...job.metadata,
+            openchamber: { ...existing.metadata?.openchamber, ...job.metadata.openchamber }
+          };
+          await ctx.session.update({ sessionID: job.sessionId, title: job.title, metadata });
+          result = { outcome: "accepted" };
         } else if (job.type === "put-instructions") {
           await ctx.session.instructions.entry.put({ sessionID: job.sessionId, key: job.key, value: job.value });
           result = { outcome: "accepted" };
@@ -206,10 +238,26 @@ var index_default = {
           result = { outcome: "accepted" };
         } else throw new Error(`Unknown discussion job: ${job.type}`);
       } catch (error) {
-        if (job.type === "create-session") {
+        if (job.type === "create-root-session" || job.type === "create-session") {
           try {
             const existing = await ctx.session.get({ sessionID: job.sessionId });
-            if (existing.metadata?.discussionRoomId === job.roomId && existing.metadata?.discussionMemberId === job.memberId) result = { outcome: "accepted", sessionId: existing.id };
+            const matchesRoot = job.type === "create-root-session" && existing.metadata?.discussionRoomId === job.roomId && existing.metadata?.discussionRoot === true;
+            const matchesMember = job.type === "create-session" && existing.metadata?.discussionRoomId === job.roomId && existing.metadata?.discussionMemberId === job.memberId;
+            if (matchesRoot) {
+              try {
+                await ctx.session.synthetic({
+                  sessionID: existing.id,
+                  id: `msg_discussion_root_${job.roomId}`,
+                  text: job.note,
+                  description: "\u591A\u667A\u80FD\u4F53\u8BA8\u8BBA\u5BA4\u4F1A\u8BDD\u7EC4",
+                  resume: false,
+                  metadata: { source: "multi-agent-discussion-root", discussionRoomId: job.roomId }
+                });
+              } catch (noteError) {
+                if (noteError?.code !== "CONFLICT") console.error("Discussion root note failed", noteError.message);
+              }
+            }
+            if (matchesRoot || matchesMember) result = { outcome: "accepted", sessionId: existing.id };
           } catch {
           }
         }

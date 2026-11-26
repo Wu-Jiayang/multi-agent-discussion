@@ -77,7 +77,9 @@ export class RoomStore {
         paused_reason TEXT, human_id TEXT NOT NULL, human_name TEXT NOT NULL,
         budget_period INTEGER NOT NULL DEFAULT 1, budget_limit INTEGER NOT NULL DEFAULT 50,
         budget_remaining INTEGER NOT NULL DEFAULT 50, temp_root TEXT NOT NULL,
-        workspace_dir TEXT NOT NULL, config_json TEXT NOT NULL, rules_version TEXT NOT NULL
+        workspace_dir TEXT NOT NULL, config_json TEXT NOT NULL, rules_version TEXT NOT NULL,
+        root_session_id TEXT, root_creation_status TEXT NOT NULL DEFAULT 'pending', root_creation_error TEXT,
+        root_next_attempt_at TEXT, root_task_attempts INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS members (
         id TEXT PRIMARY KEY, room_id TEXT NOT NULL REFERENCES rooms(id), kind TEXT NOT NULL,
@@ -87,7 +89,8 @@ export class RoomStore {
         last_check_at TEXT, execution_round INTEGER NOT NULL DEFAULT 0,
         idle_epoch INTEGER NOT NULL DEFAULT 0, last_status TEXT,
         last_started_event TEXT, last_terminal_round INTEGER NOT NULL DEFAULT -1,
-        next_attempt_at TEXT, task_error TEXT, task_attempts INTEGER NOT NULL DEFAULT 0
+        next_attempt_at TEXT, task_error TEXT, task_attempts INTEGER NOT NULL DEFAULT 0,
+        session_linked INTEGER NOT NULL DEFAULT 0
       );
       CREATE UNIQUE INDEX IF NOT EXISTS members_session ON members(session_id) WHERE session_id IS NOT NULL;
       CREATE TABLE IF NOT EXISTS messages (
@@ -144,12 +147,19 @@ export class RoomStore {
       );
     `);
     const previousSchema = this.db.prepare("SELECT value FROM meta WHERE key='schema'").get()?.value || "0";
+    const roomColumns = new Set(this.db.prepare("PRAGMA table_info(rooms)").all().map(row => row.name));
+    for (const [name, definition] of Object.entries({
+      root_session_id: "TEXT", root_creation_status: "TEXT NOT NULL DEFAULT 'pending'",
+      root_creation_error: "TEXT", root_next_attempt_at: "TEXT", root_task_attempts: "INTEGER NOT NULL DEFAULT 0",
+    })) {
+      if (!roomColumns.has(name)) this.db.exec(`ALTER TABLE rooms ADD COLUMN ${name} ${definition}`);
+    }
     const reminderColumns = new Set(this.db.prepare("PRAGMA table_info(reminders)").all().map(row => row.name));
     for (const [name, definition] of Object.entries({ lease_until: "TEXT", next_attempt_at: "TEXT", charged: "INTEGER NOT NULL DEFAULT 0", refunded: "INTEGER NOT NULL DEFAULT 0", charged_period: "INTEGER" })) {
       if (!reminderColumns.has(name)) this.db.exec(`ALTER TABLE reminders ADD COLUMN ${name} ${definition}`);
     }
     const memberColumns = new Set(this.db.prepare("PRAGMA table_info(members)").all().map(row => row.name));
-    for (const [name, definition] of Object.entries({ next_attempt_at: "TEXT", task_error: "TEXT", task_attempts: "INTEGER NOT NULL DEFAULT 0" })) {
+    for (const [name, definition] of Object.entries({ next_attempt_at: "TEXT", task_error: "TEXT", task_attempts: "INTEGER NOT NULL DEFAULT 0", session_linked: "INTEGER NOT NULL DEFAULT 0" })) {
       if (!memberColumns.has(name)) this.db.exec(`ALTER TABLE members ADD COLUMN ${name} ${definition}`);
     }
     const presentationColumns = new Set(this.db.prepare("PRAGMA table_info(presentations)").all().map(row => row.name));
@@ -169,7 +179,7 @@ export class RoomStore {
           WHERE budget_periods.room_id=rooms.id AND budget_periods.period=rooms.budget_period));
       `);
     }
-    this.db.prepare("INSERT INTO meta(key,value) VALUES('schema','3') ON CONFLICT(key) DO UPDATE SET value='3'").run();
+    this.db.prepare("INSERT INTO meta(key,value) VALUES('schema','4') ON CONFLICT(key) DO UPDATE SET value='4'").run();
   }
 
   close() { this.db.close(); }
@@ -229,6 +239,8 @@ export class RoomStore {
       roomId: room.id, title: room.title, projectDir: room.project_dir, preset: room.preset,
       status: room.status, pausedReason: room.paused_reason, createdAt: room.created_at,
       startedAt: room.started_at, endedAt: room.ended_at, latestSeq: latest.seq || 0,
+      rootSessionId: room.root_session_id, rootCreationStatus: room.root_creation_status,
+      rootCreationError: room.root_creation_error,
       pendingQuestions: pending.count, human: { memberId: room.human_id, displayName: room.human_name, kind: "human" },
       members: members.map(member => this.memberView(member)),
       budget: { period: room.budget_period, limit: room.budget_limit, remaining: room.budget_remaining, used: room.budget_limit - room.budget_remaining },
@@ -242,7 +254,7 @@ export class RoomStore {
       role: member.role, roleLabel: ROLE_LABELS[member.role] || member.role,
       model: parse(member.model_json), sessionId: member.session_id,
       creationStatus: member.creation_status, creationError: member.creation_error, taskError: member.task_error,
-      sessionStatus: member.last_status || "unknown",
+      sessionLinked: member.session_linked === 1, sessionStatus: member.last_status || "unknown",
     };
   }
 
@@ -268,6 +280,7 @@ export class RoomStore {
       return { id: id("m"), role, displayName, model: { providerID: model.providerID, id: model.id, name: model.name || model.id, ...(model.variant ? { variant: model.variant } : {}) } };
     });
     const roomId = id("r");
+    const rootSessionId = `ses_disc_${roomId}_root`;
     const humanName = cleanText(input.humanName || "房主", "humanName", { maxChars: 80 });
     if (names.has(humanName.trim().toLowerCase())) fail("ROOM_DUPLICATE_NAME", "The host display name must differ from agent names.", { displayName: humanName });
     const tempRoot = cleanText(input.tempRoot, "tempRoot", { maxChars: 4096 });
@@ -276,8 +289,8 @@ export class RoomStore {
     const limit = Number.isInteger(input.budgetLimit) && input.budgetLimit > 0 ? input.budgetLimit : (preset === "debate" ? 12 : 50);
     const config = { preset, budgetLimit: limit, roles: RULES_VERSION, members: members.map(({ memberId, ...member }) => member) };
     return this.tx(() => {
-      this.db.prepare(`INSERT INTO rooms(id,project_dir,title,preset,status,created_at,human_id,human_name,budget_period,budget_limit,budget_remaining,temp_root,workspace_dir,config_json,rules_version)
-        VALUES(?,?,?,?,'creating',?,?,?,1,?,?,?,?,?,?)`).run(roomId, projectDir, title, preset, now, id("h"), humanName, limit, limit, tempRoot, workspaceDir, json(config), RULES_VERSION);
+      this.db.prepare(`INSERT INTO rooms(id,project_dir,title,preset,status,created_at,human_id,human_name,budget_period,budget_limit,budget_remaining,temp_root,workspace_dir,config_json,rules_version,root_session_id,root_creation_status)
+        VALUES(?,?,?,?,'creating',?,?,?,1,?,?,?,?,?,?,?,'pending')`).run(roomId, projectDir, title, preset, now, id("h"), humanName, limit, limit, tempRoot, workspaceDir, json(config), RULES_VERSION, rootSessionId);
       const humanId = this.db.prepare("SELECT human_id FROM rooms WHERE id=?").get(roomId).human_id;
       this.db.prepare(`INSERT INTO members(id,room_id,kind,display_name,role,creation_status,created_at) VALUES(?,?,'human',?,'host','ready',?)`)
         .run(humanId, roomId, humanName, now);
@@ -302,14 +315,55 @@ export class RoomStore {
       this.db.prepare("UPDATE rooms SET status='creating', paused_reason=NULL WHERE id=?").run(roomId);
       this.db.prepare("UPDATE members SET creation_error=NULL,creation_status='pending',next_attempt_at=NULL,task_error=NULL WHERE room_id=? AND session_id IS NULL").run(roomId);
       this.db.prepare("UPDATE members SET creation_error=NULL,instructions_added=0,next_attempt_at=NULL,task_error=NULL WHERE room_id=? AND session_id IS NOT NULL AND creation_status<>'ready'").run(roomId);
+      this.db.prepare("UPDATE rooms SET root_creation_status=CASE WHEN root_creation_status='ready' THEN 'ready' ELSE 'pending' END,root_creation_error=NULL,root_next_attempt_at=NULL WHERE id=?").run(roomId);
       return this.roomSummary(this.room(roomId));
     });
+  }
+
+  prepareRoomRoot(roomId) {
+    const room = this.room(roomId);
+    if (room.root_session_id) return room;
+    const rootSessionId = `ses_disc_${roomId}_root`;
+    this.db.prepare("UPDATE rooms SET root_session_id=?,root_creation_status=CASE WHEN root_creation_status='ready' THEN 'pending' ELSE root_creation_status END WHERE id=? AND root_session_id IS NULL").run(rootSessionId, roomId);
+    return this.room(roomId);
+  }
+
+  rootTaskAttempt(roomId, now = new Date().toISOString()) {
+    const retryAt = new Date(Date.parse(now) + 5000).toISOString();
+    this.db.prepare("UPDATE rooms SET root_task_attempts=root_task_attempts+1,root_next_attempt_at=? WHERE id=?").run(retryAt, roomId);
+  }
+
+  rootSessionCreated(roomId, sessionID, now = new Date().toISOString()) {
+    this.room(roomId);
+    if (typeof sessionID !== "string" || !sessionID) throw new Error("Room root session creation returned no session ID");
+    this.db.prepare("UPDATE rooms SET root_session_id=?,root_creation_status='ready',root_creation_error=NULL,root_next_attempt_at=NULL WHERE id=?").run(sessionID, roomId);
+  }
+
+  rootSessionFailed(roomId, message, now = new Date().toISOString()) {
+    const room = this.room(roomId);
+    const attempts = room.root_task_attempts;
+    const delay = Math.min(60000, 5000 * Math.max(1, attempts));
+    const retryAt = new Date(Date.parse(now) + delay).toISOString();
+    this.db.prepare("UPDATE rooms SET root_creation_status='failed',root_creation_error=?,root_next_attempt_at=? WHERE id=?").run(String(message).slice(0, 2000), retryAt, roomId);
+  }
+
+  resetMissingRoot(roomId) {
+    const room = this.room(roomId);
+    if (room.root_creation_status !== "ready" || !room.root_session_id) return false;
+    this.db.prepare("UPDATE rooms SET root_creation_status='pending',root_creation_error='根会话不存在，正在重建',root_next_attempt_at=NULL WHERE id=?").run(roomId);
+    this.db.prepare("UPDATE members SET session_linked=0 WHERE room_id=? AND kind='agent' AND session_id IS NOT NULL").run(roomId);
+    return true;
+  }
+
+  sessionLinked(roomId, memberId) {
+    this.room(roomId); this.member(memberId);
+    this.db.prepare("UPDATE members SET session_linked=1,next_attempt_at=NULL,task_error=NULL WHERE id=? AND room_id=?").run(memberId, roomId);
   }
 
   sessionCreated(roomId, memberId, sessionID, now = new Date().toISOString()) {
     this.room(roomId); this.member(memberId);
     this.tx(() => {
-      this.db.prepare("UPDATE members SET session_id=?,creation_status='session-created',creation_error=NULL,next_attempt_at=NULL,task_error=NULL WHERE id=? AND room_id=? AND session_id IS NULL")
+      this.db.prepare("UPDATE members SET session_id=?,creation_status='session-created',creation_error=NULL,next_attempt_at=NULL,task_error=NULL,session_linked=1 WHERE id=? AND room_id=? AND session_id IS NULL")
         .run(sessionID, memberId, roomId);
       this.finishCreationIfReady(roomId, now);
     });
@@ -392,7 +446,7 @@ export class RoomStore {
       if (duplicate || (before.kind !== "human" && name.toLowerCase() === room.human_name.toLowerCase())) fail("ROOM_DUPLICATE_NAME", "Member display names must be unique.", { displayName: name });
       this.db.prepare("UPDATE members SET display_name=? WHERE id=? AND room_id=?").run(name, memberId, roomId);
       if (before.kind === "human") this.db.prepare("UPDATE rooms SET human_name=? WHERE id=?").run(name, roomId);
-      this.db.prepare("UPDATE members SET instructions_added=0 WHERE room_id=? AND kind='agent'").run(roomId);
+      this.db.prepare("UPDATE members SET instructions_added=0,session_linked=0 WHERE room_id=? AND kind='agent'").run(roomId);
       this.configEvent(roomId, "member-renamed", { memberId, displayName: before.display_name }, { memberId, displayName: name });
     });
     return this.memberView(this.member(memberId));

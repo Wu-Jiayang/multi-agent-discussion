@@ -9348,7 +9348,9 @@ var RoomStore = class {
         paused_reason TEXT, human_id TEXT NOT NULL, human_name TEXT NOT NULL,
         budget_period INTEGER NOT NULL DEFAULT 1, budget_limit INTEGER NOT NULL DEFAULT 50,
         budget_remaining INTEGER NOT NULL DEFAULT 50, temp_root TEXT NOT NULL,
-        workspace_dir TEXT NOT NULL, config_json TEXT NOT NULL, rules_version TEXT NOT NULL
+        workspace_dir TEXT NOT NULL, config_json TEXT NOT NULL, rules_version TEXT NOT NULL,
+        root_session_id TEXT, root_creation_status TEXT NOT NULL DEFAULT 'pending', root_creation_error TEXT,
+        root_next_attempt_at TEXT, root_task_attempts INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS members (
         id TEXT PRIMARY KEY, room_id TEXT NOT NULL REFERENCES rooms(id), kind TEXT NOT NULL,
@@ -9358,7 +9360,8 @@ var RoomStore = class {
         last_check_at TEXT, execution_round INTEGER NOT NULL DEFAULT 0,
         idle_epoch INTEGER NOT NULL DEFAULT 0, last_status TEXT,
         last_started_event TEXT, last_terminal_round INTEGER NOT NULL DEFAULT -1,
-        next_attempt_at TEXT, task_error TEXT, task_attempts INTEGER NOT NULL DEFAULT 0
+        next_attempt_at TEXT, task_error TEXT, task_attempts INTEGER NOT NULL DEFAULT 0,
+        session_linked INTEGER NOT NULL DEFAULT 0
       );
       CREATE UNIQUE INDEX IF NOT EXISTS members_session ON members(session_id) WHERE session_id IS NOT NULL;
       CREATE TABLE IF NOT EXISTS messages (
@@ -9415,12 +9418,22 @@ var RoomStore = class {
       );
     `);
     const previousSchema = this.db.prepare("SELECT value FROM meta WHERE key='schema'").get()?.value || "0";
+    const roomColumns = new Set(this.db.prepare("PRAGMA table_info(rooms)").all().map((row) => row.name));
+    for (const [name, definition] of Object.entries({
+      root_session_id: "TEXT",
+      root_creation_status: "TEXT NOT NULL DEFAULT 'pending'",
+      root_creation_error: "TEXT",
+      root_next_attempt_at: "TEXT",
+      root_task_attempts: "INTEGER NOT NULL DEFAULT 0"
+    })) {
+      if (!roomColumns.has(name)) this.db.exec(`ALTER TABLE rooms ADD COLUMN ${name} ${definition}`);
+    }
     const reminderColumns = new Set(this.db.prepare("PRAGMA table_info(reminders)").all().map((row) => row.name));
     for (const [name, definition] of Object.entries({ lease_until: "TEXT", next_attempt_at: "TEXT", charged: "INTEGER NOT NULL DEFAULT 0", refunded: "INTEGER NOT NULL DEFAULT 0", charged_period: "INTEGER" })) {
       if (!reminderColumns.has(name)) this.db.exec(`ALTER TABLE reminders ADD COLUMN ${name} ${definition}`);
     }
     const memberColumns = new Set(this.db.prepare("PRAGMA table_info(members)").all().map((row) => row.name));
-    for (const [name, definition] of Object.entries({ next_attempt_at: "TEXT", task_error: "TEXT", task_attempts: "INTEGER NOT NULL DEFAULT 0" })) {
+    for (const [name, definition] of Object.entries({ next_attempt_at: "TEXT", task_error: "TEXT", task_attempts: "INTEGER NOT NULL DEFAULT 0", session_linked: "INTEGER NOT NULL DEFAULT 0" })) {
       if (!memberColumns.has(name)) this.db.exec(`ALTER TABLE members ADD COLUMN ${name} ${definition}`);
     }
     const presentationColumns = new Set(this.db.prepare("PRAGMA table_info(presentations)").all().map((row) => row.name));
@@ -9440,7 +9453,7 @@ var RoomStore = class {
           WHERE budget_periods.room_id=rooms.id AND budget_periods.period=rooms.budget_period));
       `);
     }
-    this.db.prepare("INSERT INTO meta(key,value) VALUES('schema','3') ON CONFLICT(key) DO UPDATE SET value='3'").run();
+    this.db.prepare("INSERT INTO meta(key,value) VALUES('schema','4') ON CONFLICT(key) DO UPDATE SET value='4'").run();
   }
   close() {
     this.db.close();
@@ -9501,6 +9514,9 @@ var RoomStore = class {
       startedAt: room.started_at,
       endedAt: room.ended_at,
       latestSeq: latest.seq || 0,
+      rootSessionId: room.root_session_id,
+      rootCreationStatus: room.root_creation_status,
+      rootCreationError: room.root_creation_error,
       pendingQuestions: pending.count,
       human: { memberId: room.human_id, displayName: room.human_name, kind: "human" },
       members: members.map((member) => this.memberView(member)),
@@ -9522,6 +9538,7 @@ var RoomStore = class {
       creationStatus: member.creation_status,
       creationError: member.creation_error,
       taskError: member.task_error,
+      sessionLinked: member.session_linked === 1,
       sessionStatus: member.last_status || "unknown"
     };
   }
@@ -9547,6 +9564,7 @@ var RoomStore = class {
       return { id: id("m"), role, displayName, model: { providerID: model.providerID, id: model.id, name: model.name || model.id, ...model.variant ? { variant: model.variant } : {} } };
     });
     const roomId = id("r");
+    const rootSessionId = `ses_disc_${roomId}_root`;
     const humanName = cleanText(input.humanName || "\u623F\u4E3B", "humanName", { maxChars: 80 });
     if (names.has(humanName.trim().toLowerCase())) fail("ROOM_DUPLICATE_NAME", "The host display name must differ from agent names.", { displayName: humanName });
     const tempRoot = cleanText(input.tempRoot, "tempRoot", { maxChars: 4096 });
@@ -9555,8 +9573,8 @@ var RoomStore = class {
     const limit = Number.isInteger(input.budgetLimit) && input.budgetLimit > 0 ? input.budgetLimit : preset === "debate" ? 12 : 50;
     const config = { preset, budgetLimit: limit, roles: RULES_VERSION, members: members.map(({ memberId, ...member }) => member) };
     return this.tx(() => {
-      this.db.prepare(`INSERT INTO rooms(id,project_dir,title,preset,status,created_at,human_id,human_name,budget_period,budget_limit,budget_remaining,temp_root,workspace_dir,config_json,rules_version)
-        VALUES(?,?,?,?,'creating',?,?,?,1,?,?,?,?,?,?)`).run(roomId, projectDir, title, preset, now, id("h"), humanName, limit, limit, tempRoot, workspaceDir, json(config), RULES_VERSION);
+      this.db.prepare(`INSERT INTO rooms(id,project_dir,title,preset,status,created_at,human_id,human_name,budget_period,budget_limit,budget_remaining,temp_root,workspace_dir,config_json,rules_version,root_session_id,root_creation_status)
+        VALUES(?,?,?,?,'creating',?,?,?,1,?,?,?,?,?,?,?,'pending')`).run(roomId, projectDir, title, preset, now, id("h"), humanName, limit, limit, tempRoot, workspaceDir, json(config), RULES_VERSION, rootSessionId);
       const humanId = this.db.prepare("SELECT human_id FROM rooms WHERE id=?").get(roomId).human_id;
       this.db.prepare(`INSERT INTO members(id,room_id,kind,display_name,role,creation_status,created_at) VALUES(?,?,'human',?,'host','ready',?)`).run(humanId, roomId, humanName, now);
       const insert = this.db.prepare(`INSERT INTO members(id,room_id,kind,display_name,role,model_json,creation_status,created_at) VALUES(?,?,'agent',?,?,?,'pending',?)`);
@@ -9579,14 +9597,50 @@ var RoomStore = class {
       this.db.prepare("UPDATE rooms SET status='creating', paused_reason=NULL WHERE id=?").run(roomId);
       this.db.prepare("UPDATE members SET creation_error=NULL,creation_status='pending',next_attempt_at=NULL,task_error=NULL WHERE room_id=? AND session_id IS NULL").run(roomId);
       this.db.prepare("UPDATE members SET creation_error=NULL,instructions_added=0,next_attempt_at=NULL,task_error=NULL WHERE room_id=? AND session_id IS NOT NULL AND creation_status<>'ready'").run(roomId);
+      this.db.prepare("UPDATE rooms SET root_creation_status=CASE WHEN root_creation_status='ready' THEN 'ready' ELSE 'pending' END,root_creation_error=NULL,root_next_attempt_at=NULL WHERE id=?").run(roomId);
       return this.roomSummary(this.room(roomId));
     });
+  }
+  prepareRoomRoot(roomId) {
+    const room = this.room(roomId);
+    if (room.root_session_id) return room;
+    const rootSessionId = `ses_disc_${roomId}_root`;
+    this.db.prepare("UPDATE rooms SET root_session_id=?,root_creation_status=CASE WHEN root_creation_status='ready' THEN 'pending' ELSE root_creation_status END WHERE id=? AND root_session_id IS NULL").run(rootSessionId, roomId);
+    return this.room(roomId);
+  }
+  rootTaskAttempt(roomId, now = (/* @__PURE__ */ new Date()).toISOString()) {
+    const retryAt = new Date(Date.parse(now) + 5e3).toISOString();
+    this.db.prepare("UPDATE rooms SET root_task_attempts=root_task_attempts+1,root_next_attempt_at=? WHERE id=?").run(retryAt, roomId);
+  }
+  rootSessionCreated(roomId, sessionID, now = (/* @__PURE__ */ new Date()).toISOString()) {
+    this.room(roomId);
+    if (typeof sessionID !== "string" || !sessionID) throw new Error("Room root session creation returned no session ID");
+    this.db.prepare("UPDATE rooms SET root_session_id=?,root_creation_status='ready',root_creation_error=NULL,root_next_attempt_at=NULL WHERE id=?").run(sessionID, roomId);
+  }
+  rootSessionFailed(roomId, message, now = (/* @__PURE__ */ new Date()).toISOString()) {
+    const room = this.room(roomId);
+    const attempts = room.root_task_attempts;
+    const delay = Math.min(6e4, 5e3 * Math.max(1, attempts));
+    const retryAt = new Date(Date.parse(now) + delay).toISOString();
+    this.db.prepare("UPDATE rooms SET root_creation_status='failed',root_creation_error=?,root_next_attempt_at=? WHERE id=?").run(String(message).slice(0, 2e3), retryAt, roomId);
+  }
+  resetMissingRoot(roomId) {
+    const room = this.room(roomId);
+    if (room.root_creation_status !== "ready" || !room.root_session_id) return false;
+    this.db.prepare("UPDATE rooms SET root_creation_status='pending',root_creation_error='\u6839\u4F1A\u8BDD\u4E0D\u5B58\u5728\uFF0C\u6B63\u5728\u91CD\u5EFA',root_next_attempt_at=NULL WHERE id=?").run(roomId);
+    this.db.prepare("UPDATE members SET session_linked=0 WHERE room_id=? AND kind='agent' AND session_id IS NOT NULL").run(roomId);
+    return true;
+  }
+  sessionLinked(roomId, memberId) {
+    this.room(roomId);
+    this.member(memberId);
+    this.db.prepare("UPDATE members SET session_linked=1,next_attempt_at=NULL,task_error=NULL WHERE id=? AND room_id=?").run(memberId, roomId);
   }
   sessionCreated(roomId, memberId, sessionID, now = (/* @__PURE__ */ new Date()).toISOString()) {
     this.room(roomId);
     this.member(memberId);
     this.tx(() => {
-      this.db.prepare("UPDATE members SET session_id=?,creation_status='session-created',creation_error=NULL,next_attempt_at=NULL,task_error=NULL WHERE id=? AND room_id=? AND session_id IS NULL").run(sessionID, memberId, roomId);
+      this.db.prepare("UPDATE members SET session_id=?,creation_status='session-created',creation_error=NULL,next_attempt_at=NULL,task_error=NULL,session_linked=1 WHERE id=? AND room_id=? AND session_id IS NULL").run(sessionID, memberId, roomId);
       this.finishCreationIfReady(roomId, now);
     });
   }
@@ -9656,7 +9710,7 @@ ${members.map((m) => `- ${m.display_name} \xB7 ${m.kind === "agent" ? "Agent" : 
       if (duplicate || before.kind !== "human" && name.toLowerCase() === room.human_name.toLowerCase()) fail("ROOM_DUPLICATE_NAME", "Member display names must be unique.", { displayName: name });
       this.db.prepare("UPDATE members SET display_name=? WHERE id=? AND room_id=?").run(name, memberId, roomId);
       if (before.kind === "human") this.db.prepare("UPDATE rooms SET human_name=? WHERE id=?").run(name, roomId);
-      this.db.prepare("UPDATE members SET instructions_added=0 WHERE room_id=? AND kind='agent'").run(roomId);
+      this.db.prepare("UPDATE members SET instructions_added=0,session_linked=0 WHERE room_id=? AND kind='agent'").run(roomId);
       this.configEvent(roomId, "member-renamed", { memberId, displayName: before.display_name }, { memberId, displayName: name });
     });
     return this.memberView(this.member(memberId));
@@ -10437,6 +10491,8 @@ var RoomEngine = class {
     this.store = store;
     this.now = options.now || (() => (/* @__PURE__ */ new Date()).toISOString());
     this.statusProvider = options.statusProvider || (async () => ({ status: "unknown" }));
+    this.rootSessionProvider = options.rootSessionProvider || null;
+    this.rootChecks = /* @__PURE__ */ new Map();
     this.onChange = options.onChange || (() => {
     });
     this.waitKinds = options.waitKinds || /* @__PURE__ */ new Map();
@@ -10591,7 +10647,23 @@ var RoomEngine = class {
     const statuses = await Promise.all(members.map((member) => this.queryStatus(member)));
     return Object.fromEntries(members.map((member, index) => [member.id, statuses[index]]));
   }
+  async ensureRootSession(roomId) {
+    if (!this.rootSessionProvider) return;
+    const room = this.store.room(roomId);
+    if (room.status === "ended" || room.root_creation_status !== "ready" || !room.root_session_id) return;
+    const checkedAt = this.rootChecks.get(roomId) || 0;
+    if (Date.now() - checkedAt < 3e4) return;
+    try {
+      await this.rootSessionProvider(room.root_session_id);
+      this.rootChecks.set(roomId, Date.now());
+    } catch (error) {
+      if (error?.status !== 404) return;
+      if (this.store.resetMissingRoot(roomId)) this.changed(roomId);
+      this.rootChecks.delete(roomId);
+    }
+  }
   async roomState(roomId) {
+    await this.ensureRootSession(roomId);
     const summary = this.store.roomSummary(this.store.room(roomId));
     const statuses = await this.memberStatuses(roomId);
     summary.members = summary.members.map((member) => member.kind === "agent" ? { ...member, sessionStatus: statuses[member.memberId] || "unknown" } : member);
@@ -10735,6 +10807,7 @@ var RoomEngine = class {
   nextJob() {
     const now = this.now();
     const due = (member) => !member.next_attempt_at || Date.parse(member.next_attempt_at) <= Date.parse(now);
+    const rootDue = (room) => !room.root_next_attempt_at || Date.parse(room.root_next_attempt_at) <= Date.parse(now);
     for (const room of this.store.listRooms()) {
       if (room.status === "ended") {
         for (const member of this.store.agents(room.roomId)) {
@@ -10745,31 +10818,58 @@ var RoomEngine = class {
         }
       }
     }
-    for (const room of this.store.listRooms()) {
-      if (room.status === "ended") continue;
-      for (const member of this.store.agents(room.roomId)) {
+    for (const listed of this.store.listRooms()) {
+      if (listed.status === "ended") continue;
+      const room = this.store.prepareRoomRoot(listed.roomId);
+      const roomId = room.id;
+      if (room.root_creation_status !== "ready") {
+        if (!rootDue(room)) continue;
+        this.store.rootTaskAttempt(roomId, now);
+        return {
+          jobId: `root:${roomId}`,
+          type: "create-root-session",
+          roomId,
+          sessionId: room.root_session_id,
+          title: `${room.title} \xB7 \u8BA8\u8BBA\u5BA4`,
+          directory: room.project_dir,
+          metadata: { discussionRoomId: roomId, discussionRoot: true },
+          note: `\u8FD9\u662F\u201C${room.title}\u201D\u7684\u8BA8\u8BBA\u5BA4\u4F1A\u8BDD\u7EC4\u3002\u6210\u5458\u4F1A\u8BDD\u4E0D\u4F1A\u663E\u793A\u5728\u4FA7\u680F\uFF0C\u8BF7\u4ECE\u201C\u591A\u667A\u80FD\u4F53\u8BA8\u8BBA\u5BA4\u201D\u9875\u9762\u4E2D\u7684\u6210\u5458\u201C\u4F1A\u8BDD\u201D\u6309\u94AE\u6253\u5F00\u3002\u623F\u95F4\u81EA\u52A8\u8C03\u5EA6\u4E0D\u4F1A\u5411\u672C\u4F1A\u8BDD\u8C03\u7528\u6A21\u578B\uFF1B\u8BF7\u52FF\u76F4\u63A5\u5411\u672C\u4F1A\u8BDD\u53D1\u9001\u8BAE\u9898\u3002`
+        };
+      }
+      for (const member of this.store.agents(roomId)) {
         if (!due(member)) continue;
+        const metadata = {
+          discussionRoomId: roomId,
+          discussionMemberId: member.id,
+          openchamber: { kind: "workflow-agent", parentID: room.root_session_id }
+        };
+        const title = `${room.title} \xB7 ${member.display_name}`;
+        if (member.session_id && !member.session_linked) {
+          this.store.taskAttempt(roomId, member.id, now);
+          return { jobId: `link:${roomId}:${member.id}`, type: "link-session", roomId, memberId: member.id, sessionId: member.session_id, title, metadata };
+        }
+        if (room.status === "ended") continue;
         if (!member.session_id && member.creation_status === "pending") {
-          this.store.taskAttempt(room.roomId, member.id, now);
+          this.store.taskAttempt(roomId, member.id, now);
           return {
-            jobId: `create:${room.roomId}:${member.id}`,
+            jobId: `create:${roomId}:${member.id}`,
             type: "create-session",
-            roomId: room.roomId,
+            roomId,
             memberId: member.id,
-            sessionId: `ses_disc_${room.roomId}_${member.id}`,
-            title: `${room.title} \xB7 ${member.display_name}`,
-            directory: room.projectDir,
+            sessionId: `ses_disc_${roomId}_${member.id}`,
+            title,
+            directory: room.project_dir,
             model: JSON.parse(member.model_json),
             permissions: [
               { action: "*", resource: "*", effect: "allow" },
               { action: "question", resource: "*", effect: "deny" }
             ],
-            metadata: { discussionRoomId: room.roomId, discussionMemberId: member.id }
+            metadata
           };
         }
         if (member.session_id && !member.instructions_added) {
-          this.store.taskAttempt(room.roomId, member.id, now);
-          return { jobId: `instructions:${room.roomId}:${member.id}`, type: "put-instructions", roomId: room.roomId, memberId: member.id, sessionId: member.session_id, ...this.store.instructions(room.roomId, member.id) };
+          this.store.taskAttempt(roomId, member.id, now);
+          return { jobId: `instructions:${roomId}:${member.id}`, type: "put-instructions", roomId, memberId: member.id, sessionId: member.session_id, ...this.store.instructions(roomId, member.id) };
         }
       }
     }
@@ -10848,9 +10948,15 @@ var RoomEngine = class {
   }
   async jobResult(job, result) {
     const outcome = result.outcome;
-    if (job.type === "create-session") {
+    if (job.type === "create-root-session") {
+      if (outcome === "accepted") this.store.rootSessionCreated(job.roomId, result.sessionId, this.now());
+      else this.store.rootSessionFailed(job.roomId, result.error || "Room root session creation failed", this.now());
+    } else if (job.type === "create-session") {
       if (outcome === "accepted") this.store.sessionCreated(job.roomId, job.memberId, result.sessionId, this.now());
       else this.store.sessionFailed(job.roomId, job.memberId, result.error || "Session creation failed");
+    } else if (job.type === "link-session") {
+      if (outcome === "accepted") this.store.sessionLinked(job.roomId, job.memberId);
+      else this.store.taskFailed(job.roomId, job.memberId, result.error || "Session grouping failed", this.now());
     } else if (job.type === "put-instructions") {
       if (outcome === "accepted") this.store.instructionsAdded(job.roomId, job.memberId);
       else if (!this.store.member(job.memberId).instructions_added) this.store.taskFailed(job.roomId, job.memberId, result.error || "Instruction update failed", this.now());
@@ -10963,7 +11069,11 @@ function createDiscussionService(options = {}) {
       headers: { authorization: `Bearer ${serviceToken}` },
       signal: AbortSignal.timeout(5e3)
     });
-    if (!response.ok) throw new Error(`OpenCode read returned ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(`OpenCode read returned ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
     return response.json();
   }
   async function statusProvider(sessionID) {
@@ -10992,6 +11102,7 @@ function createDiscussionService(options = {}) {
   engine = options.engine || new RoomEngine(store, {
     statusProvider,
     waitKinds,
+    rootSessionProvider: (sessionID) => opencode(`/api/session/${encodeURIComponent(sessionID)}`),
     onChange: (event) => {
       statusCache.clear();
       if (serviceHost) void serviceHost.emit("room:changed", event).catch(() => {
@@ -11079,7 +11190,10 @@ function createDiscussionService(options = {}) {
     if (req.method === "GET" && url.pathname === "/meta") return json2(res, 200, { humanName: defaultHumanName() });
     if (req.method === "GET" && url.pathname === "/models") {
       const directory = query(url).directory;
-      return json2(res, 200, { models: directory ? modelCatalogs.get(directory) || [] : models, unicode: UNICODE_IMPLEMENTATION, maxAgentWidth: MAX_AGENT_MESSAGE_WIDTH });
+      const scoped = directory ? modelCatalogs.get(directory) : void 0;
+      const catalog = scoped ?? models;
+      const source = catalog.length ? scoped ? "project" : "global" : "empty";
+      return json2(res, 200, { models: catalog, source, unicode: UNICODE_IMPLEMENTATION, maxAgentWidth: MAX_AGENT_MESSAGE_WIDTH });
     }
     if (req.method === "GET" && url.pathname === "/rooms") return json2(res, 200, { rooms: engine.listRooms(query(url).projectDir || null) });
     if (req.method === "POST" && url.pathname === "/rooms") {

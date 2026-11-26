@@ -1978,12 +1978,380 @@ ${GUEST_SCROLLBAR_CSS}
 ${UI_SIZE_CSS}
 ${GUEST_UI_LOOK_CSS}`;
 
+  // node_modules/@openchamber/sdk/dist/ui/dom.js
+  var STYLE_ID = "oc-sdk-ui-style";
+  var clearNode = (node) => {
+    while (node.firstChild) {
+      node.removeChild(node.firstChild);
+    }
+  };
+  var ensureStyle = (css) => {
+    const existing = document.getElementById(STYLE_ID);
+    if (existing instanceof HTMLStyleElement) {
+      if (existing.textContent !== css) {
+        existing.textContent = css;
+      }
+      return;
+    }
+    installGuestScrollbarActivity(document);
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = css;
+    document.head.appendChild(style);
+  };
+  var el = (tag, className) => {
+    const node = document.createElement(tag);
+    if (className) {
+      node.className = className;
+    }
+    return node;
+  };
+  var button = (className) => {
+    const node = el("button", className);
+    node.type = "button";
+    return node;
+  };
+  var setText = (node, text) => {
+    const next = text ?? "";
+    if (node.textContent !== next) {
+      node.textContent = next;
+    }
+  };
+  var setAttr = (node, name, value) => {
+    if (value === void 0 || value === null || value === "") {
+      node.removeAttribute(name);
+    } else if (node.getAttribute(name) !== value) {
+      node.setAttribute(name, value);
+    }
+  };
+  var onOutsideClick = (node, handler) => {
+    const listener = (event) => {
+      if (event.target instanceof Node && node.contains(event.target)) {
+        return;
+      }
+      handler();
+    };
+    document.addEventListener("pointerdown", listener, true);
+    return () => {
+      document.removeEventListener("pointerdown", listener, true);
+    };
+  };
+
+  // node_modules/@openchamber/sdk/dist/ui/icons.js
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var ICON_PATH = {
+    search: "M18.031 16.617l4.283 4.282-1.415 1.415-4.282-4.283A8.96 8.96 0 0 1 11 20c-4.968 0-9-4.032-9-9s4.032-9 9-9 9 4.032 9 9a8.96 8.96 0 0 1-1.969 5.617zm-2.006-.742A6.977 6.977 0 0 0 18 11c0-3.868-3.133-7-7-7-3.868 0-7 3.132-7 7 0 3.867 3.132 7 7 7a6.977 6.977 0 0 0 4.875-1.975l.15-.15z",
+    chevron: "M12 13.172l4.95-4.95 1.414 1.414L12 16 5.636 9.636 7.05 8.222z",
+    check: "M10 15.172l9.192-9.193 1.415 1.414L10 18l-6.364-6.364 1.414-1.414z",
+    close: "M12 10.586l4.95-4.95 1.414 1.414-4.95 4.95 4.95 4.95-1.414 1.414-4.95-4.95-4.95 4.95-1.414-1.414 4.95-4.95-4.95-4.95L7.05 5.636z"
+  };
+  var icon = (name, size, className) => {
+    const node = document.createElementNS(SVG_NS, "svg");
+    node.setAttribute("viewBox", "0 0 24 24");
+    node.setAttribute("width", String(size));
+    node.setAttribute("height", String(size));
+    node.style.width = len(size);
+    node.style.height = len(size);
+    node.setAttribute("aria-hidden", "true");
+    node.setAttribute("fill", "currentColor");
+    if (className) {
+      node.setAttribute("class", className);
+    }
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", ICON_PATH[name]);
+    node.append(path);
+    return node;
+  };
+
+  // node_modules/@openchamber/sdk/dist/ui/navigation.js
+  var navigationKey = (event, axis = "vertical") => {
+    const [next, previous] = axis === "vertical" ? ["ArrowDown", "ArrowUp"] : ["ArrowRight", "ArrowLeft"];
+    if (event.key === next || event.ctrlKey && event.key.toLowerCase() === "n")
+      return "next";
+    if (event.key === previous || event.ctrlKey && event.key.toLowerCase() === "p")
+      return "previous";
+    if (event.key === "Home")
+      return "first";
+    if (event.key === "End")
+      return "last";
+    return null;
+  };
+  var moveListSelection = (items, currentId, key) => {
+    const enabled = items.filter((item) => !item.disabled);
+    if (enabled.length === 0) {
+      return null;
+    }
+    const first = enabled[0];
+    const last = enabled[enabled.length - 1];
+    if (key === "first" || !first || !last) {
+      return first?.id ?? null;
+    }
+    if (key === "last") {
+      return last.id;
+    }
+    const index = enabled.findIndex((item) => item.id === currentId);
+    if (index === -1) {
+      return key === "next" ? first.id : last.id;
+    }
+    const target = enabled[Math.min(enabled.length - 1, Math.max(0, index + (key === "next" ? 1 : -1)))];
+    return target?.id ?? null;
+  };
+
+  // node_modules/@openchamber/sdk/dist/ui/option.js
+  var optionId = (uid, id) => `${uid}-${id ?? ""}`;
+  var createOption = (uid, role, spec, on) => {
+    const node = button("oc-sdk-option");
+    node.id = optionId(uid, spec.id);
+    node.setAttribute("role", role);
+    node.tabIndex = -1;
+    node.disabled = Boolean(spec.disabled);
+    if (role === "option") {
+      node.setAttribute("aria-selected", spec.selected ? "true" : "false");
+    }
+    node.dataset.destructive = spec.destructive ? "true" : "false";
+    const label = el("span", "oc-sdk-option-label");
+    label.textContent = spec.label;
+    node.append(label);
+    if (spec.hint) {
+      const hint = el("span", "oc-sdk-option-hint");
+      hint.textContent = spec.hint;
+      node.append(hint);
+    }
+    if (role === "option") {
+      node.dataset.mark = "check";
+      const check = el("span", "oc-sdk-option-check");
+      check.append(icon("check", 14));
+      node.append(check);
+    }
+    node.addEventListener("pointerenter", on.hover);
+    node.addEventListener("click", on.pick);
+    return node;
+  };
+  var highlightOption = (container, focusOwner, uid, id) => {
+    const target = optionId(uid, id);
+    for (const child of Array.from(container.children)) {
+      if (child instanceof HTMLElement && child.classList.contains("oc-sdk-option")) {
+        child.dataset.active = child.id === target ? "true" : "false";
+      }
+    }
+    setAttr(focusOwner, "aria-activedescendant", id ? target : null);
+    container.querySelector('[data-active="true"]')?.scrollIntoView({ block: "nearest" });
+  };
+
+  // node_modules/@openchamber/sdk/dist/ui/popup.js
+  var placePopup = (popup, trigger) => {
+    const rect = trigger.getBoundingClientRect();
+    popup.style.minWidth = `${Math.round(rect.width)}px`;
+    popup.style.left = `${Math.round(rect.left)}px`;
+    popup.style.top = `${Math.round(rect.bottom + 4)}px`;
+    const height = popup.offsetHeight;
+    const roomBelow = window.innerHeight - rect.bottom - 8;
+    if (height > roomBelow && rect.top - 8 > roomBelow) {
+      popup.style.top = `${Math.max(8, Math.round(rect.top - 4 - height))}px`;
+    }
+    const overflow = rect.left + popup.offsetWidth - window.innerWidth + 8;
+    if (overflow > 0) {
+      popup.style.left = `${Math.max(8, Math.round(rect.left - overflow))}px`;
+    }
+  };
+  var openPopup = (host2, trigger, popup, close) => {
+    host2.append(popup);
+    placePopup(popup, trigger);
+    const stopOutside = onOutsideClick(host2, close);
+    const onResize = () => {
+      close();
+    };
+    const onScroll = (event) => {
+      if (event.target instanceof Node && popup.contains(event.target)) {
+        return;
+      }
+      close();
+    };
+    window.addEventListener("resize", onResize);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      stopOutside();
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("scroll", onScroll, true);
+      popup.remove();
+    };
+  };
+
+  // node_modules/@openchamber/sdk/dist/ui/select.js
+  var filterSelectOptions = (options, query) => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) {
+      return [...options];
+    }
+    return options.filter((option) => option.label.toLowerCase().includes(needle) || option.id.toLowerCase().includes(needle));
+  };
+  var selectCount = 0;
+  var mountSelect = (root, initial) => {
+    ensureStyle(UI_CSS);
+    let props = initial;
+    const uid = `oc-sdk-select-${selectCount += 1}`;
+    const wrap = el("div", "oc-sdk oc-sdk-select");
+    const caption = el("span", "oc-sdk-field-label");
+    caption.id = `${uid}-label`;
+    const trigger = button("oc-sdk-trigger");
+    trigger.setAttribute("aria-haspopup", "listbox");
+    trigger.setAttribute("aria-labelledby", caption.id);
+    const value = el("span", "oc-sdk-trigger-value");
+    trigger.append(value, icon("chevron", 14, "oc-sdk-trigger-chevron"));
+    wrap.append(caption, trigger);
+    root.append(wrap);
+    let query = "";
+    let activeId = null;
+    let closePopup = null;
+    const popup = el("div", "oc-sdk oc-sdk-popup");
+    const searchSlot = el("div", "oc-sdk-popup-search");
+    const search = el("input", "oc-sdk-input");
+    search.type = "text";
+    search.autocomplete = "off";
+    searchSlot.append(search);
+    const listbox = el("div");
+    listbox.setAttribute("role", "listbox");
+    listbox.tabIndex = -1;
+    popup.append(listbox);
+    const visible = () => filterSelectOptions(props.options, props.searchable ? query : "");
+    const focusOwner = () => props.searchable ? search : listbox;
+    const setActive = (id) => {
+      activeId = id;
+      highlightOption(listbox, focusOwner(), uid, id);
+    };
+    const paintOptions = () => {
+      clearNode(listbox);
+      const options = visible();
+      if (options.length === 0) {
+        const empty = el("div", "oc-sdk-popup-empty");
+        empty.textContent = "No matches";
+        listbox.append(empty);
+      }
+      for (const option of options) {
+        listbox.append(createOption(uid, "option", { ...option, selected: option.id === props.value }, {
+          hover: () => setActive(option.id),
+          pick: () => pick(option.id)
+        }));
+      }
+      setActive(options.some((option) => option.id === activeId) ? activeId : options[0]?.id ?? null);
+    };
+    const close = () => {
+      const dispose = closePopup;
+      closePopup = null;
+      dispose?.();
+      query = "";
+      search.value = "";
+      trigger.setAttribute("aria-expanded", "false");
+    };
+    const open = () => {
+      if (closePopup || props.disabled) {
+        return;
+      }
+      activeId = props.value;
+      search.placeholder = props.searchPlaceholder ?? "Search";
+      if (props.searchable)
+        popup.prepend(searchSlot);
+      else
+        searchSlot.remove();
+      paintOptions();
+      closePopup = openPopup(wrap, trigger, popup, close);
+      trigger.setAttribute("aria-expanded", "true");
+      focusOwner().focus();
+    };
+    const pick = (id) => {
+      close();
+      trigger.focus();
+      if (id !== props.value)
+        props.onChange(id);
+    };
+    const onTriggerClick = () => {
+      if (closePopup)
+        close();
+      else
+        open();
+    };
+    const onTriggerKey = (event) => {
+      if (!closePopup && navigationKey(event)) {
+        event.preventDefault();
+        open();
+      }
+    };
+    const onPopupKey = (event) => {
+      const step = navigationKey(event);
+      if (step) {
+        event.preventDefault();
+        setActive(moveListSelection(visible(), activeId, step));
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        if (activeId)
+          pick(activeId);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+        trigger.focus();
+      } else if (props.searchable && event.target !== search && event.key.length === 1 && !event.ctrlKey && !event.metaKey) {
+        search.focus();
+      }
+    };
+    const onSearchInput = () => {
+      query = search.value;
+      paintOptions();
+    };
+    const onFocusOut = (event) => {
+      if (closePopup && !(event.relatedTarget instanceof Node && wrap.contains(event.relatedTarget)))
+        close();
+    };
+    const paint = () => {
+      setText(caption, props.label);
+      caption.hidden = !props.label;
+      const current = props.options.find((option) => option.id === props.value);
+      setText(value, current?.label ?? props.placeholder ?? "Select");
+      value.dataset.empty = current ? "false" : "true";
+      trigger.disabled = Boolean(props.disabled);
+      if (closePopup)
+        paintOptions();
+    };
+    trigger.addEventListener("click", onTriggerClick);
+    trigger.addEventListener("keydown", onTriggerKey);
+    popup.addEventListener("keydown", onPopupKey);
+    search.addEventListener("input", onSearchInput);
+    wrap.addEventListener("focusout", onFocusOut);
+    paint();
+    return {
+      update: (next) => {
+        props = { ...props, ...next };
+        paint();
+      },
+      dispose: () => {
+        close();
+        trigger.removeEventListener("click", onTriggerClick);
+        trigger.removeEventListener("keydown", onTriggerKey);
+        popup.removeEventListener("keydown", onPopupKey);
+        search.removeEventListener("input", onSearchInput);
+        wrap.removeEventListener("focusout", onFocusOut);
+        wrap.remove();
+      }
+    };
+  };
+
   // src/panel/main.mjs
   var host = connectHost();
   var $ = (selector) => document.querySelector(selector);
   var app = $("#app");
   var state = {
     directory: null,
+    projectDir: null,
+    projectId: null,
+    projectManual: false,
+    projects: [],
+    projectsState: "loading",
+    projectsError: null,
+    modelSource: null,
+    modelError: null,
+    modelsLoading: false,
+    modelsForProject: void 0,
+    modelsRequestGeneration: 0,
+    contextGeneration: 0,
     rooms: [],
     models: [],
     room: null,
@@ -2026,6 +2394,7 @@ ${GUEST_UI_LOOK_CSS}`;
     "waiting-permission": "\u7B49\u5F85\u6743\u9650\u786E\u8BA4",
     unknown: "\u72B6\u6001\u672A\u77E5\uFF0F\u4E0D\u53EF\u8FBE"
   };
+  var rootStatusLabels = { pending: "\u51C6\u5907\u4E2D", ready: "\u5DF2\u5C31\u7EEA", failed: "\u521B\u5EFA\u5931\u8D25" };
   function escape(value) {
     return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
   }
@@ -2079,26 +2448,235 @@ ${GUEST_UI_LOOK_CSS}`;
     select.value = state.roomId || "";
     $("#new-room").textContent = state.creating ? "\u53D6\u6D88\u65B0\u5EFA" : "\u65B0\u5EFA\u623F\u95F4";
   }
-  async function refreshModels(force = false) {
-    if (!state.directory || !force && state.models.length) return;
+  var projectSelectHandle = null;
+  var projectsLoaded = false;
+  var projectsSubscribed = false;
+  var modelHandles = /* @__PURE__ */ new Map();
+  var agentUid = 0;
+  function projectOptions() {
+    const options = [];
+    const directories = /* @__PURE__ */ new Set();
+    if (state.directory && !state.projects.some((project) => project.directory === state.directory)) {
+      options.push({ id: "current-workspace", label: "\u5F53\u524D\u5DE5\u4F5C\u533A", hint: state.directory, directory: state.directory });
+      directories.add(state.directory);
+    }
+    for (const project of state.projects) {
+      if (!project || typeof project.directory !== "string" || directories.has(project.directory)) continue;
+      options.push({ id: project.id, label: project.name || project.directory, hint: project.directory, directory: project.directory });
+      directories.add(project.directory);
+    }
+    return options;
+  }
+  function resolveProjectSelection() {
+    const options = projectOptions();
+    let option = state.projectId ? options.find((item) => item.id === state.projectId) : null;
+    if (!option && state.projectManual) state.projectManual = false;
+    if (!option) {
+      option = options.find((item) => item.directory === state.projectDir) || (state.directory ? options.find((item) => item.directory === state.directory) : null) || (state.directory ? options.find((item) => item.id === "current-workspace") : null) || null;
+    }
+    state.projectId = option?.id || null;
+    state.projectDir = option?.directory ?? state.directory ?? null;
+  }
+  function renderProjectHint() {
+    const el2 = $("#project-hint");
+    if (!el2) return;
+    let text = "";
+    if (state.projectsState === "loading") text = "\u6B63\u5728\u8BFB\u53D6\u9879\u76EE\u5217\u8868\u2026";
+    else if (state.projectsState === "error") text = "\u9879\u76EE\u5217\u8868\u8BFB\u53D6\u5931\u8D25\uFF0C\u4ECD\u53EF\u4F7F\u7528\u5F53\u524D\u5DE5\u4F5C\u533A\u3002";
+    el2.textContent = text;
+    el2.hidden = !text;
+  }
+  function updateProjectPicker() {
+    if (!projectSelectHandle) return;
+    const options = projectOptions();
+    const value = options.some((option) => option.id === state.projectId) ? state.projectId : null;
+    projectSelectHandle.update({
+      options,
+      value,
+      disabled: state.projectsState === "loading",
+      placeholder: options.length ? "\u9009\u62E9\u9879\u76EE" : state.projectsState === "loading" ? "\u8BFB\u53D6\u9879\u76EE\u2026" : "\u6CA1\u6709\u53EF\u7528\u9879\u76EE"
+    });
+    renderProjectHint();
+  }
+  function applyProjectsSnapshot(snapshot) {
+    if (snapshot?.state === "error") {
+      state.projectsState = "error";
+      state.projectsError = new Error("\u9879\u76EE\u5217\u8868\u8BFB\u53D6\u5931\u8D25\u3002");
+      updateProjectPicker();
+      return;
+    }
+    const previousDir = state.projectDir;
+    state.projectsState = snapshot?.state || "ready";
+    state.projectsError = null;
+    const nextProjects = Array.isArray(snapshot?.projects) ? snapshot.projects.filter((project) => project && typeof project.id === "string" && typeof project.directory === "string") : [];
+    if (state.projectsState === "loading" && !nextProjects.length && state.projects.length) {
+      updateProjectPicker();
+      return;
+    }
+    state.projects = nextProjects;
+    resolveProjectSelection();
+    updateProjectPicker();
+    if (state.projectDir !== previousDir) void reloadProjectContext();
+  }
+  async function loadProjects() {
     try {
-      const catalog = await request("GET", "/models", null, { directory: state.directory });
-      const signature = JSON.stringify(catalog.models);
-      if (signature === JSON.stringify(state.models)) return;
-      state.models = catalog.models;
-      if (!state.createAgents.length) resetCreateAgents();
-      else {
-        const available = new Set(state.models.map(modelKey));
-        const missing = state.createAgents.some((row) => row.modelKey && !available.has(row.modelKey));
-        if (missing) {
-          for (const row of state.createAgents) if (!available.has(row.modelKey)) row.modelKey = "";
-          showError(new Error("\u6A21\u578B\u76EE\u5F55\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9\u53D7\u5F71\u54CD\u7684\u6210\u5458\u6A21\u578B\u3002"));
-        }
-      }
-      if (state.creating) renderCreate();
+      applyProjectsSnapshot(await host.listProjects());
     } catch (error) {
+      state.projectsState = "error";
+      state.projectsError = error;
+      updateProjectPicker();
+    }
+  }
+  function subscribeProjects() {
+    if (projectsSubscribed) return;
+    projectsSubscribed = true;
+    host.onProjects(applyProjectsSnapshot).catch((error) => {
+      state.projectsState = "error";
+      state.projectsError = error;
+      updateProjectPicker();
+    });
+  }
+  function mountProjectPicker() {
+    if (projectSelectHandle) return;
+    const root = $("#project-picker");
+    if (!root) return;
+    projectSelectHandle = mountSelect(root, {
+      label: "\u623F\u95F4\u6240\u5C5E\u9879\u76EE",
+      value: null,
+      options: [],
+      onChange: (id) => selectProject(id),
+      placeholder: "\u8BFB\u53D6\u9879\u76EE\u2026",
+      searchable: true,
+      searchPlaceholder: "\u641C\u7D22\u9879\u76EE",
+      disabled: true
+    });
+    updateProjectPicker();
+  }
+  function selectProject(id) {
+    const option = projectOptions().find((item) => item.id === id);
+    if (!option) return;
+    state.projectManual = true;
+    state.projectId = id;
+    const changed = state.projectDir !== option.directory;
+    state.projectDir = option.directory;
+    projectSelectHandle?.update({ value: id });
+    if (changed) void reloadProjectContext();
+    else updateProjectPicker();
+  }
+  function modelKey(model) {
+    return model ? JSON.stringify([model.providerID, model.id, model.variant || ""]) : "";
+  }
+  function modelSelectOptions() {
+    return state.models.map((model) => ({
+      id: modelKey(model),
+      label: `${model.providerName || model.providerID || "\u672A\u77E5\u63D0\u4F9B\u5546"} \xB7 ${model.name || model.id}${model.variant ? ` (${model.variant})` : ""}`,
+      hint: model.providerID || ""
+    }));
+  }
+  function normalizeModelSource(source, models) {
+    if (source === "project" || source === "global" || source === "empty") return source;
+    return models.length ? state.projectDir ? "project" : "global" : "empty";
+  }
+  function renderModelSourceHint() {
+    const el2 = $("#model-source-hint");
+    if (!el2) return;
+    let text = "";
+    let retry = false;
+    if (state.modelsLoading) text = "\u6B63\u5728\u8BFB\u53D6\u6A21\u578B\u76EE\u5F55\u2026";
+    else if (state.modelError) {
+      text = `\u6A21\u578B\u76EE\u5F55\u8BFB\u53D6\u5931\u8D25\uFF1A${state.modelError.message || state.modelError}`;
+      retry = true;
+    } else if (state.modelSource === "global") text = "\u8BE5\u9879\u76EE\u6A21\u578B\u76EE\u5F55\u5C1A\u672A\u52A0\u8F7D\uFF0C\u5F53\u524D\u663E\u793A\u5168\u5C40\u76EE\u5F55\uFF1B\u521B\u5EFA\u65F6\u4F1A\u6309\u9879\u76EE\u914D\u7F6E\u6821\u9A8C\u3002";
+    else if (state.modelSource === "empty") {
+      text = state.projectDir ? "\u8BE5\u9879\u76EE\u6682\u65E0\u53EF\u7528\u6A21\u578B\u76EE\u5F55\u3002" : "\u5C1A\u672A\u8BFB\u53D6\u5230\u53EF\u7528\u6A21\u578B\u76EE\u5F55\u3002";
+      retry = true;
+    } else if (!state.projectDir) text = "\u5C1A\u672A\u9009\u62E9\u9879\u76EE\uFF0C\u5C06\u4F7F\u7528\u5168\u5C40\u6A21\u578B\u76EE\u5F55\u3002";
+    el2.classList.toggle("warning", retry);
+    el2.innerHTML = text ? `${escape(text)}${retry ? ` <button class="button ghost" data-action="retry-models">\u91CD\u8BD5</button>` : ""}` : "";
+    el2.hidden = !text;
+  }
+  function disposeModelHandles() {
+    for (const handle of modelHandles.values()) handle.dispose();
+    modelHandles.clear();
+  }
+  function mountCreateModelPickers() {
+    for (const root of document.querySelectorAll("#agent-rows [data-model-picker]")) {
+      const row = state.createAgents[Number(root.dataset.modelPicker)];
+      if (!row) continue;
+      let handle;
+      handle = mountSelect(root, {
+        label: "\u6A21\u578B",
+        value: row.modelKey || null,
+        options: modelSelectOptions(),
+        onChange: (id) => {
+          const current = state.createAgents.find((item) => item.uid === row.uid);
+          if (!current) return;
+          current.modelKey = id;
+          handle.update({ value: id });
+          updateCreateActions();
+        },
+        placeholder: "\u8BF7\u9009\u62E9\u6A21\u578B",
+        searchable: true,
+        searchPlaceholder: "\u641C\u7D22\u6A21\u578B\u6216\u63D0\u4F9B\u5546",
+        disabled: !state.models.length
+      });
+      modelHandles.set(row.uid, handle);
+    }
+  }
+  function syncCreateModelPickers() {
+    if (!$("#agent-rows") || $("#create-view").hidden) return;
+    for (const [uid, handle] of modelHandles) {
+      const row = state.createAgents.find((item) => item.uid === uid);
+      if (!row) continue;
+      handle.update({ options: modelSelectOptions(), value: row.modelKey || null, disabled: !state.models.length });
+    }
+    updateCreateActions();
+    renderModelSourceHint();
+  }
+  function updateCreateActions() {
+    const button2 = $("#create-actions")?.querySelector('[data-action="create-room"]');
+    if (!button2) return;
+    button2.disabled = !state.models.length || !state.projectDir || state.modelsLoading || state.createAgents.some((row) => !row.modelKey);
+  }
+  function validateCreateModels() {
+    if (!state.createAgents.length) {
+      resetCreateAgents();
+      return;
+    }
+    const available = new Set(state.models.map(modelKey));
+    const missing = state.createAgents.some((row) => row.modelKey && !available.has(row.modelKey));
+    if (!missing) return;
+    for (const row of state.createAgents) if (row.modelKey && !available.has(row.modelKey)) row.modelKey = "";
+    showError(new Error("\u6A21\u578B\u76EE\u5F55\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9\u53D7\u5F71\u54CD\u7684\u6210\u5458\u6A21\u578B\u3002"));
+  }
+  async function refreshModels(force = false, generation = state.contextGeneration) {
+    if (!force && !state.modelsLoading && state.modelsForProject === state.projectDir && (state.models.length || state.modelSource)) return;
+    const requestGeneration = ++state.modelsRequestGeneration;
+    state.modelsLoading = true;
+    state.modelError = null;
+    renderModelSourceHint();
+    try {
+      const catalog = await request("GET", "/models", null, state.projectDir ? { directory: state.projectDir } : null);
+      if (generation !== state.contextGeneration || requestGeneration !== state.modelsRequestGeneration) return;
+      state.models = Array.isArray(catalog?.models) ? catalog.models : [];
+      state.modelsForProject = state.projectDir;
+      state.modelSource = normalizeModelSource(catalog?.source, state.models);
+      state.modelsLoading = false;
+      validateCreateModels();
+      if (!state.createAgents.length) resetCreateAgents();
+      syncCreateModelPickers();
+    } catch (error) {
+      if (generation !== state.contextGeneration || requestGeneration !== state.modelsRequestGeneration) return;
+      state.models = [];
+      state.modelsForProject = state.projectDir;
+      state.modelsLoading = false;
+      state.modelSource = "empty";
+      state.modelError = error;
+      validateCreateModels();
+      syncCreateModelPickers();
       showError(error);
     }
+    renderModelSourceHint();
   }
   function showCreate() {
     state.creating = true;
@@ -2121,18 +2699,12 @@ ${GUEST_UI_LOOK_CSS}`;
     for (let suffix = 2; rows.some((row, rowIndex) => rowIndex !== index && row.displayName === name); suffix += 1) name = `${base} ${suffix}`;
     return name;
   }
-  function modelKey(model) {
-    return model ? JSON.stringify([model.providerID, model.id, model.variant || ""]) : "";
-  }
-  function modelOptions(selected) {
-    const providers = [...new Set(state.models.map((model) => model.providerID))];
-    return `<option value="" ${selected ? "" : "selected"}>\u8BF7\u9009\u62E9\u6A21\u578B</option>` + providers.map((provider) => `<optgroup label="${escape(provider)}">${state.models.filter((model) => model.providerID === provider).map((model) => `<option value="${escape(modelKey(model))}" ${selected === modelKey(model) ? "selected" : ""}>${escape(model.name)}${model.variant ? ` (${escape(model.variant)})` : ""}</option>`).join("")}</optgroup>`).join("");
-  }
   function renderCreate() {
+    disposeModelHandles();
     const preset = state.createPreset || "generic";
     $("#create-view").innerHTML = `
     <h1>\u65B0\u5EFA\u8BA8\u8BBA\u5BA4</h1>
-    <p class="intro">\u4E3A\u6BCF\u4E2A\u89D2\u8272\u521B\u5EFA\u72EC\u7ACB OpenCode \u4F1A\u8BDD\u3002\u786E\u8BA4\u524D\u53EF\u6539\u663E\u793A\u540D\uFF1B\u5EFA\u623F\u672C\u8EAB\u4E0D\u4F1A\u8C03\u7528\u6A21\u578B\u3002</p>
+    <p class="intro">\u6BCF\u4E2A\u623F\u95F4\u521B\u5EFA\u4E00\u4E2A\u6839\u4F1A\u8BDD\uFF1B\u6210\u5458\u4F1A\u8BDD\u4E0D\u663E\u793A\u5728\u4FA7\u680F\uFF0C\u53EF\u4ECE\u6210\u5458\u201C\u4F1A\u8BDD\u201D\u6309\u94AE\u6253\u5F00\u3002\u5EFA\u623F\u672C\u8EAB\u4E0D\u4F1A\u8C03\u7528\u6A21\u578B\u3002</p>
     <div class="form-grid">
       <div class="field"><label>\u623F\u95F4\u540D\u79F0</label><input id="create-title" value="${escape(state.createTitle || "\u65B0\u7684\u8BA8\u8BBA\u5BA4")}" maxlength="120"></div>
       <div class="field"><label>\u9884\u8BBE</label><select id="create-preset"><option value="generic" ${preset === "generic" ? "selected" : ""}>\u666E\u901A\u8BA8\u8BBA</option><option value="debate" ${preset === "debate" ? "selected" : ""}>\u53CC\u6A21\u578B\u8FA9\u8BBA</option></select></div>
@@ -2140,33 +2712,78 @@ ${GUEST_UI_LOOK_CSS}`;
     </div>
     ${preset === "debate" ? `<div class="warning">\u53CC\u6A21\u578B\u8FA9\u8BBA\u9884\u8BBE\u5171\u4EAB 12 \u6B21\u81EA\u52A8\u5524\u9192\u3002\u521D\u59CB\u7ACB\u573A\u4F1A\u5199\u8FDB\u4F1A\u8BDD\u6307\u4EE4\uFF0C\u5141\u8BB8\u968F\u8BC1\u636E\u4FEE\u6539\u3002</div>` : ""}
     <div id="agent-rows">${state.createAgents.map((row, index) => `
-      <div class="agent-editor" data-agent="${index}">
+      <div class="agent-editor" data-agent="${index}" data-agent-uid="${escape(row.uid)}">
         <div class="agent-title"><strong>\u6210\u5458 ${index + 1}</strong><button class="button ghost danger" data-action="remove-agent" ${state.createAgents.length <= 2 ? "disabled" : ""}>\u79FB\u9664</button></div>
         <div class="agent-fields">
           <div class="field"><label>\u663E\u793A\u540D</label><input data-field="displayName" value="${escape(row.displayName)}" maxlength="80"></div>
           <div class="field"><label>\u89D2\u8272</label><select data-field="role">${Object.entries(roleLabels).map(([value, label]) => `<option value="${value}" ${row.role === value ? "selected" : ""}>${label}</option>`).join("")}</select></div>
-          <div class="field"><label>\u6A21\u578B</label><select data-field="model">${state.models.length ? modelOptions(row.modelKey) : `<option>\u6B63\u5728\u8BFB\u53D6\u53EF\u7528\u6A21\u578B\u2026</option>`}</select></div>
+          <div class="field model-picker" data-model-picker="${index}"></div>
         </div>
       </div>`).join("")}</div>
     <button class="button secondary" data-action="add-agent">\u6DFB\u52A0\u6210\u5458</button>
-    <div class="warning">\u65B0\u4F1A\u8BDD\u4F7F\u7528\u5F53\u524D\u9879\u76EE\u5DE5\u4F5C\u533A\uFF0C\u9ED8\u8BA4\u5B8C\u5168\u6267\u884C\u6743\u9650\uFF0C\u5E76\u5728\u4F1A\u8BDD\u7EA7\u7981\u7528\u539F\u751F\u63D0\u95EE\u5DE5\u5177\u3002\u591A\u4E2A Agent \u540C\u65F6\u5199\u540C\u4E00\u5DE5\u4F5C\u533A\u53EF\u80FD\u4E92\u76F8\u8986\u76D6\u6587\u4EF6\uFF1B\u8BA8\u8BBA\u6587\u6863\u8BF7\u5199\u623F\u95F4\u4E34\u65F6\u76EE\u5F55\u3002\u4E0D\u4F1A\u4FEE\u6539\u5168\u5C40\u6743\u9650\uFF0C\u4E0D\u521B\u5EFA worktree\u3002</div>
-    <div class="create-actions"><button class="button primary" data-action="create-room" ${!state.models.length || !state.directory || state.createAgents.some((row) => !row.modelKey) ? "disabled" : ""}>\u521B\u5EFA\u623F\u95F4</button><button class="button secondary" data-action="cancel-create">\u53D6\u6D88</button></div>
-    ${!state.directory ? `<p class="intro">\u8BF7\u5148\u5728 OpenChamber \u6253\u5F00\u4E00\u4E2A\u9879\u76EE\u3002</p>` : ""}
+    <div class="warning">\u65B0\u4F1A\u8BDD\u4F7F\u7528\u6240\u9009\u9879\u76EE\u5DE5\u4F5C\u533A\uFF0C\u9ED8\u8BA4\u5B8C\u5168\u6267\u884C\u6743\u9650\uFF0C\u5E76\u5728\u4F1A\u8BDD\u7EA7\u7981\u7528\u539F\u751F\u63D0\u95EE\u5DE5\u5177\u3002\u591A\u4E2A Agent \u540C\u65F6\u5199\u540C\u4E00\u5DE5\u4F5C\u533A\u53EF\u80FD\u4E92\u76F8\u8986\u76D6\u6587\u4EF6\uFF1B\u8BA8\u8BBA\u6587\u6863\u8BF7\u5199\u623F\u95F4\u4E34\u65F6\u76EE\u5F55\u3002\u4E0D\u4F1A\u4FEE\u6539\u5168\u5C40\u6743\u9650\uFF0C\u4E0D\u521B\u5EFA worktree\u3002</div>
+    <div id="model-source-hint" class="model-source-hint" hidden></div>
+    <div id="create-actions" class="create-actions"><button class="button primary" data-action="create-room" disabled>\u521B\u5EFA\u623F\u95F4</button><button class="button secondary" data-action="cancel-create">\u53D6\u6D88</button></div>
+    ${!state.projectDir ? `<p class="intro">\u8BF7\u5148\u9009\u62E9\u623F\u95F4\u6240\u5C5E\u9879\u76EE\u3002</p>` : ""}
   `;
+    mountCreateModelPickers();
+    updateCreateActions();
+    renderModelSourceHint();
+  }
+  function newAgentRow(model) {
+    return { uid: `agent-${++agentUid}`, role: "generic", displayName: "", modelKey: modelKey(model), autoName: true };
   }
   function resetCreateAgents() {
     state.createPreset = "generic";
     state.createTitle = "\u65B0\u7684\u8BA8\u8BBA\u5BA4";
-    state.createAgents = [0, 1].map((index) => ({ role: "generic", displayName: `Agent ${index + 1}`, modelKey: modelKey(state.models[Math.min(index, Math.max(0, state.models.length - 1))]), autoName: true }));
+    state.createAgents = [0, 1].map((index) => {
+      const row = newAgentRow(state.models[index] || state.models[0] || null);
+      row.displayName = `Agent ${index + 1}`;
+      return row;
+    });
   }
-  async function loadRooms(preferred) {
-    const data = await request("GET", "/rooms", null, { projectDir: state.directory });
+  async function reloadProjectContext() {
+    const generation = ++state.contextGeneration;
+    state.pendingView = null;
+    state.rooms = [];
+    state.room = null;
+    state.roomId = null;
+    state.timeline = [];
+    state.timelineCursor = null;
+    state.timelineSignature = "";
+    state.questions = [];
+    state.questionSignature = "";
+    state.questionFirstSignature = "";
+    state.questionCursor = null;
+    state.selectedQuestionId = null;
+    state.chatAnchor = null;
+    state.followLatest = true;
+    state.models = [];
+    state.modelsForProject = void 0;
+    state.modelSource = null;
+    state.modelError = null;
+    state.modelsLoading = false;
+    renderRoomSelect();
+    $("#room-view").hidden = true;
+    if (!state.creating) {
+      $("#create-view").hidden = false;
+      renderCreate();
+    }
+    if (!state.projectDir) {
+      await refreshModels(true, generation);
+      return;
+    }
+    await Promise.all([refreshModels(true, generation), loadRooms(null, generation)]);
+  }
+  async function loadRooms(preferred, generation = state.contextGeneration) {
+    const data = await request("GET", "/rooms", null, { projectDir: state.projectDir });
+    if (generation !== state.contextGeneration) return;
     state.rooms = data.rooms;
     const requested = preferred || state.roomId;
     let next = state.rooms.some((room) => room.roomId === requested) ? requested : state.rooms[0]?.roomId || null;
     if (state.creating) next = null;
     renderRoomSelect();
-    if (next && state.rooms.some((room) => room.roomId === next)) await selectRoom(next, state.pendingView);
+    if (next && state.rooms.some((room) => room.roomId === next)) await selectRoom(next, state.pendingView, generation);
     else if (!state.creating) {
       state.room = null;
       state.roomId = null;
@@ -2175,7 +2792,7 @@ ${GUEST_UI_LOOK_CSS}`;
       renderCreate();
     }
   }
-  async function selectRoom(roomId, restore = null) {
+  async function selectRoom(roomId, restore = null, generation = state.contextGeneration) {
     if (!roomId) return;
     const view = restore?.roomId === roomId ? restore : null;
     state.roomId = roomId;
@@ -2203,8 +2820,10 @@ ${GUEST_UI_LOOK_CSS}`;
     $("#history-search").value = state.search;
     renderRoomSelect();
     await Promise.all([refreshRoom(), loadQuestions()]);
+    if (generation !== state.contextGeneration) return;
     if (state.chatAnchor) await loadTimeline(false, null, state.chatAnchor);
     else await loadTimeline(true);
+    if (generation !== state.contextGeneration) return;
     if (view?.questionScroll) $("#question-list").scrollTop = view.questionScroll;
     if (view?.chatScroll) $("#timeline").scrollTop = view.chatScroll;
     renderComposer();
@@ -2213,7 +2832,10 @@ ${GUEST_UI_LOOK_CSS}`;
   }
   async function refreshRoom() {
     if (!state.roomId) return;
-    state.room = await request("GET", `/rooms/${encodeURIComponent(state.roomId)}`);
+    const roomId = state.roomId;
+    const room = await request("GET", `/rooms/${encodeURIComponent(roomId)}`);
+    if (state.roomId !== roomId) return;
+    state.room = room;
     renderRoomHeader();
     renderAuthorFilter();
     const ready = state.room.status === "ready";
@@ -2228,12 +2850,16 @@ ${GUEST_UI_LOOK_CSS}`;
     const room = state.room;
     if (!room) return;
     const paused = room.status === "paused";
+    const rootStatus = room.rootCreationStatus;
+    const rootPill = rootStatus === "ready" ? "running" : rootStatus === "failed" ? "unknown" : "waiting-human";
+    const rootChip = rootStatus || room.rootSessionId ? `<span class="member-chip root-session"><span>\u6839\u4F1A\u8BDD</span>${rootStatus ? `<span class="pill ${rootPill}">${escape(rootStatusLabels[rootStatus] || rootStatus)}</span>` : ""}${room.rootSessionId ? `<button data-action="open-root-session" data-session="${escape(room.rootSessionId)}">\u4F1A\u8BDD\u7EC4</button>` : ""}</span>` : "";
     $("#room-header").innerHTML = `
-    <div><div class="room-title">${escape(room.title)}</div><div class="member-list"><span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">\u4EBA\u7C7B \xB7 \u623F\u4E3B</span></span>${room.members.map((member) => `<span class="member-chip"><span>${escape(member.displayName)}</span>${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">\u521B\u5EFA\u5931\u8D25\uFF1A${escape(member.creationError || "\u672A\u77E5\u539F\u56E0")}</span>` : member.taskError ? `<span class="pill waiting-human">\u6307\u4EE4\u540C\u6B65\u5931\u8D25\uFF1A${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">\u4F1A\u8BDD</button>` : ""}</span>`).join("")}</div></div>
+    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">\u4EBA\u7C7B \xB7 \u623F\u4E3B</span></span>${room.members.map((member) => `<span class="member-chip"><span>${escape(member.displayName)}</span>${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">\u521B\u5EFA\u5931\u8D25\uFF1A${escape(member.creationError || "\u672A\u77E5\u539F\u56E0")}</span>` : member.taskError ? `<span class="pill waiting-human">\u6307\u4EE4\u540C\u6B65\u5931\u8D25\uFF1A${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">\u4F1A\u8BDD</button>` : ""}</span>`).join("")}</div></div>
     <div class="room-controls">
       <span class="pill budget">\u4F59\u989D ${room.budget.remaining}/${room.budget.limit} \xB7 \u7B2C ${room.budget.period} \u6BB5</span>
       ${room.status === "creating" ? `<button class="button secondary" data-action="retry">\u91CD\u8BD5\u7F3A\u5931\u4F1A\u8BDD</button>` : room.status !== "ended" ? `${paused ? `<button class="button primary" data-action="resume">\u7EE7\u7EED\u623F\u95F4</button>` : `<button class="button secondary" data-action="pause">\u6682\u505C\u5524\u9192</button>`}<button class="button ghost danger" data-action="end">\u7ED3\u675F\u623F\u95F4</button>` : ""}
     </div>
+    ${rootStatus === "failed" ? `<div class="root-error">\u6839\u4F1A\u8BDD\u521B\u5EFA\u5931\u8D25\uFF1A${escape(room.rootCreationError || "\u672A\u77E5\u539F\u56E0")}</div>` : ""}
     ${paused && room.status !== "creating" ? `<div class="composer-hint">\u81EA\u52A8\u5524\u9192\u5DF2\u6682\u505C\uFF08${escape(room.pausedReason === "budget" ? "\u989D\u5EA6\u7528\u5C3D" : "\u624B\u52A8\u6682\u505C")}\uFF09\u3002\u53D1\u5E16\u3001\u9605\u8BFB\u548C\u63D0\u95EE\u4ECD\u53EF\u4F7F\u7528\u3002</div>` : ""}
   `;
   }
@@ -2298,9 +2924,11 @@ ${GUEST_UI_LOOK_CSS}`;
   }
   async function loadTimeline(initial = false, cursor = null, contextId = null) {
     if (!state.roomId) return;
+    const roomId = state.roomId;
     let data;
-    if (contextId) data = await request("GET", `/rooms/${encodeURIComponent(state.roomId)}/messages/${encodeURIComponent(contextId)}/context`, null, { before: 5, after: 8 });
-    else data = await request("GET", `/rooms/${encodeURIComponent(state.roomId)}/timeline`, null, { cursor, limit: 50, query: state.search, authorMemberId: state.author });
+    if (contextId) data = await request("GET", `/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(contextId)}/context`, null, { before: 5, after: 8 });
+    else data = await request("GET", `/rooms/${encodeURIComponent(roomId)}/timeline`, null, { cursor, limit: 50, query: state.search, authorMemberId: state.author });
+    if (state.roomId !== roomId) return;
     const signature = JSON.stringify(data.items);
     if (!cursor && !contextId && signature === state.timelineSignature && !initial) return;
     state.timelineSignature = signature;
@@ -2386,7 +3014,9 @@ ${GUEST_UI_LOOK_CSS}`;
   }
   async function loadQuestions(append = false) {
     if (!state.roomId) return;
-    const data = await request("GET", `/rooms/${encodeURIComponent(state.roomId)}/questions`, null, { status: state.questionStatus, limit: 50, cursor: append ? state.questionCursor : null });
+    const roomId = state.roomId;
+    const data = await request("GET", `/rooms/${encodeURIComponent(roomId)}/questions`, null, { status: state.questionStatus, limit: 50, cursor: append ? state.questionCursor : null });
+    if (state.roomId !== roomId) return;
     const signature = JSON.stringify(data.items);
     if (!append && signature === state.questionFirstSignature) return;
     if (append) {
@@ -2522,10 +3152,15 @@ ${GUEST_UI_LOOK_CSS}`;
       } else showCreate();
       return;
     }
+    if (action === "retry-models") {
+      void refreshModels(true);
+      return;
+    }
     if (action === "add-agent" && state.createAgents.length < 8) {
       const index = state.createAgents.length;
-      state.createAgents.push({ role: "generic", displayName: "", modelKey: modelKey(state.models[0]), autoName: true });
-      state.createAgents[index].displayName = defaultName("generic", index, state.createAgents);
+      const row = newAgentRow(state.models[0] || null);
+      state.createAgents.push(row);
+      row.displayName = defaultName("generic", index, state.createAgents);
       renderCreate();
       return;
     }
@@ -2542,10 +3177,10 @@ ${GUEST_UI_LOOK_CSS}`;
           if (!model) throw new Error("\u8BF7\u4E3A\u6BCF\u4E2A\u6210\u5458\u9009\u62E9\u6709\u6548\u6A21\u578B\u3002");
           return { role: row.role, displayName: row.displayName.trim(), model };
         });
-        const room = await request("POST", "/rooms", { projectDir: state.directory, title: $("#create-title").value, preset: $("#create-preset").value, humanName: $("#create-human").value, members });
+        const room = await request("POST", "/rooms", { projectDir: state.projectDir, title: $("#create-title").value, preset: $("#create-preset").value, humanName: $("#create-human").value, members });
         state.creating = false;
         await loadRooms(room.roomId);
-        toast("\u623F\u95F4\u5DF2\u521B\u5EFA\uFF0C\u6B63\u5728\u51C6\u5907\u72EC\u7ACB\u4F1A\u8BDD\u3002", "success");
+        toast("\u623F\u95F4\u5DF2\u521B\u5EFA\uFF0C\u6B63\u5728\u51C6\u5907\u6839\u4F1A\u8BDD\u548C\u6210\u5458\u4F1A\u8BDD\u3002", "success");
       } catch (error) {
         showError(error);
       }
@@ -2563,7 +3198,7 @@ ${GUEST_UI_LOOK_CSS}`;
       }
       return;
     }
-    if (action === "open-session") {
+    if (action === "open-session" || action === "open-root-session") {
       persistView();
       await host.openSession(button2.dataset.session);
       return;
@@ -2758,19 +3393,9 @@ ${GUEST_UI_LOOK_CSS}`;
   });
   var refreshTimer = 0;
   async function refreshOpenRoom() {
-    if (!state.directory || document.hidden) return;
+    if (document.hidden || !state.projectDir && !state.roomId) return;
     clearTimeout(refreshTimer);
-    if (!state.models.length) {
-      try {
-        const catalog = await request("GET", "/models", null, { directory: state.directory });
-        if (catalog.models.length) {
-          state.models = catalog.models;
-          if (!state.createAgents.length) resetCreateAgents();
-          if (state.creating) renderCreate();
-        }
-      } catch {
-      }
-    }
+    if (!state.models.length && !state.modelsLoading && state.modelsForProject !== state.projectDir) await refreshModels(false);
     if (!state.roomId || state.creating) return;
     refreshTimer = setTimeout(async () => {
       try {
@@ -2787,36 +3412,59 @@ ${GUEST_UI_LOOK_CSS}`;
     if (event.topic === "models:changed") void refreshModels(true);
   });
   setInterval(() => void refreshOpenRoom(), 1800);
+  mountProjectPicker();
   var readyGeneration = 0;
   host.onReady(async (ctx) => {
     applyHostReady(ctx, document.documentElement);
     const generation = ++readyGeneration;
-    if (ctx.directory !== state.directory) {
-      state.directory = ctx.directory;
-      state.roomId = null;
-      state.rooms = [];
-      if (ctx.directory) {
-        try {
-          const saved = await host.storage.get("discussion-view");
-          if (saved?.roomId) {
-            state.roomId = saved.roomId;
-            state.pendingView = saved;
-          }
-          if (saved?.questionStatus) state.questionStatus = saved.questionStatus;
-          if (saved?.mobilePane) state.mobilePane = saved.mobilePane;
-          const [catalog, meta] = await Promise.all([
-            request("GET", "/models", null, { directory: state.directory }),
-            request("GET", "/meta")
-          ]);
-          state.createHumanName = meta.humanName || state.createHumanName;
-          state.models = catalog.models;
-          if (!state.createAgents.length) resetCreateAgents();
-          await loadRooms();
-        } catch (error) {
-          showError(error);
+    const directoryChanged = ctx.directory !== state.directory;
+    const previousProjectDir = state.projectDir;
+    state.directory = ctx.directory;
+    mountProjectPicker();
+    if (!projectsLoaded) {
+      projectsLoaded = true;
+      subscribeProjects();
+      void loadProjects();
+    }
+    if (directoryChanged) {
+      if (!state.projectManual) {
+        state.projectDir = ctx.directory;
+        state.projectId = null;
+      } else if (state.projectId === "current-workspace") state.projectDir = ctx.directory;
+      resolveProjectSelection();
+      updateProjectPicker();
+    }
+    if (state.projectDir === previousProjectDir) return;
+    const context = ++state.contextGeneration;
+    state.roomId = null;
+    state.rooms = [];
+    state.pendingView = null;
+    if (state.projectDir) {
+      try {
+        const saved = await host.storage.get("discussion-view");
+        if (generation !== readyGeneration || context !== state.contextGeneration) return;
+        if (saved?.roomId) {
+          state.roomId = saved.roomId;
+          state.pendingView = saved;
         }
+        if (saved?.questionStatus) state.questionStatus = saved.questionStatus;
+        if (saved?.mobilePane) state.mobilePane = saved.mobilePane;
+        const meta = await request("GET", "/meta");
+        if (generation !== readyGeneration || context !== state.contextGeneration) return;
+        state.createHumanName = meta.humanName || state.createHumanName;
+      } catch (error) {
+        showError(error);
+      }
+      if (generation !== readyGeneration || context !== state.contextGeneration) return;
+      await Promise.all([refreshModels(true, context), loadRooms(null, context)]);
+    } else {
+      await refreshModels(true, context);
+      if (generation !== readyGeneration || context !== state.contextGeneration) return;
+      if (!state.creating) {
+        $("#create-view").hidden = false;
+        $("#room-view").hidden = true;
+        renderCreate();
       }
     }
-    if (generation !== readyGeneration) return;
   });
 })();

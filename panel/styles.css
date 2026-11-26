@@ -28,9 +28,14 @@ textarea { resize: vertical; }
 .button.ghost { border-color: transparent; background: transparent; color: var(--muted); }
 .button.danger { color: var(--error); }
 #app { height: 100%; display: flex; flex-direction: column; }
-.app-header { min-height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.app-header { min-height: 54px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .brand { display: flex; align-items: center; gap: 9px; white-space: nowrap; }
 .brand-mark { font-size: 24px; color: var(--primary); }
+.project-picker-wrap { display: flex; align-items: center; gap: 8px; flex: 1 1 240px; max-width: 460px; min-width: 0; }
+.project-picker { flex: 1 1 180px; min-width: 0; }
+.project-picker .oc-sdk-select, .model-picker .oc-sdk-select { width: 100%; }
+.project-picker .oc-sdk-trigger, .model-picker .oc-sdk-trigger { width: 100%; }
+.project-hint { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
 .header-actions { display: flex; gap: 8px; min-width: 0; }
 .header-actions select { max-width: 280px; }
 .error { margin: 10px 16px 0; padding: 10px 12px; border: 1px solid var(--error); border-radius: var(--radius); color: var(--error); white-space: pre-wrap; }
@@ -44,11 +49,16 @@ textarea { resize: vertical; }
 .agent-editor { border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin: 12px 0; }
 .agent-editor .agent-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .agent-fields { display: grid; grid-template-columns: 1fr 1fr 1.4fr; gap: 10px; }
+.model-picker { min-width: 0; }
+.model-source-hint { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.model-source-hint.warning { color: var(--warning); }
 .create-actions { display: flex; gap: 10px; margin-top: 18px; }
 .room-view { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 340px; }
 .chat-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .room-header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
 .room-title { font-size: 16px; font-weight: 700; }
+.root-error { flex-basis: 100%; color: var(--error); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.root-session { border-color: var(--primary); }
 .pill { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: 999px; padding: 3px 8px; font-size: 12px; color: var(--muted); }
 .pill.running { color: var(--success); }
 .pill.waiting-human, .pill.waiting-question, .pill.waiting-permission { color: var(--warning); }
@@ -110,6 +120,8 @@ dialog::backdrop { background: #0008; }
 @media (max-width: 760px) {
   .app-header { padding: 8px 10px; }
   .brand strong { font-size: 13px; }
+  .project-picker-wrap { order: 3; flex: 1 1 100%; max-width: none; }
+  .project-hint { flex: 1 1 100%; }
   .header-actions select { max-width: 130px; }
   .room-view { display: block; position: relative; }
   .chat-pane, .question-pane { position: absolute; inset: 0 0 46px; }

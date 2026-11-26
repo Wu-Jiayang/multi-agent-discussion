@@ -34,7 +34,9 @@ async function fixture() {
       const job = response.data;
       if (!job?.type) break;
       jobs.push(job);
-      const result = job.type === "create-session" ? { outcome: "accepted", sessionId: job.sessionId } : { outcome: "accepted" };
+      const result = job.type === "create-root-session" || job.type === "create-session"
+        ? { outcome: "accepted", sessionId: job.sessionId }
+        : { outcome: "accepted" };
       await call("POST", "/plugin/result", { job, result }, true);
     }
     return jobs;
@@ -65,6 +67,7 @@ test("model catalog survives service restart", async () => {
   const response = await fetch(base + `/models?directory=${encodeURIComponent(root)}`, { headers: { authorization: "Bearer host" } });
   const data = await response.json();
   assert.equal(data.models[0].id, "persisted");
+  assert.equal(data.source, "project");
   service.store.close();
   await new Promise(resolveClose => service.server.close(resolveClose));
   rmSync(root, { recursive: true, force: true });
@@ -82,17 +85,24 @@ test("HTTP service authenticates host/plugin separately and creates rooms withou
     assert.equal((await f.call("GET", "/models")).data.models.length, 1);
     await f.call("POST", "/plugin/catalog", { models: [{ providerID: "other", id: "x" }], directory: "/other" }, true);
     assert.equal((await f.call("GET", "/models")).data.models[0].providerID, "other");
-    assert.deepEqual((await f.call("GET", "/models?directory=%2Fmissing")).data.models, []);
+    const fallback = (await f.call("GET", "/models?directory=%2Fmissing")).data;
+    assert.equal(fallback.source, "global");
+    assert.equal(fallback.models[0].providerID, "other");
     const created = (await f.call("POST", "/rooms", { projectDir: f.root, title: "HTTP 房间", members: [
       { role: "generic", model: { providerID: "probe", id: "fake" } },
       { role: "reviewer", model: { providerID: "probe", id: "fake" } },
     ] })).data;
     const jobs = await f.drainJobs();
+    assert.equal(jobs.filter(job => job.type === "create-root-session").length, 1);
     assert.equal(jobs.filter(job => job.type === "create-session").length, 2);
     assert.equal(jobs.filter(job => job.type === "put-instructions").length, 2);
     assert.equal(jobs.some(job => job.type === "submit-reminder"), false);
+    const memberJobs = jobs.filter(job => job.type === "create-session");
+    assert.ok(memberJobs.every(job => job.metadata.openchamber.kind === "workflow-agent"));
+    assert.ok(memberJobs.every(job => job.metadata.openchamber.parentID === created.rootSessionId));
     const room = (await f.call("GET", `/rooms/${created.roomId}`)).data;
     assert.equal(room.status, "ready");
+    assert.equal(room.rootCreationStatus, "ready");
     assert.equal(room.members.length, 2);
     assert.ok(room.members.every(member => member.sessionStatus === "idle"));
   } finally { await f.close(); }
