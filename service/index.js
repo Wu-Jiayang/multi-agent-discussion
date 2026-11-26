@@ -10985,7 +10985,7 @@ var RoomEngine = class {
 };
 
 // src/service/main.mjs
-var VERSION = "0.1.0";
+var VERSION = "0.1.1";
 var MAX_BODY = 1024 * 1024;
 function packageRoot() {
   return resolve(fileURLToPath(new URL("../", import.meta.url)));

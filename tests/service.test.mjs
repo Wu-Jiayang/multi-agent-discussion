@@ -81,6 +81,7 @@ test("HTTP service authenticates host/plugin separately and creates rooms withou
     const unauthenticated = await fetch(`http://127.0.0.1:${f.service.server.address().port}/health`);
     assert.equal(unauthenticated.status, 401);
     assert.equal(typeof (await f.call("GET", "/meta")).data.humanName, "string");
+    assert.equal((await f.call("GET", "/health")).data.version, "0.1.1");
     assert.equal((await f.call("GET", "/plugin/work", null, true)).status, 200);
     assert.equal((await f.call("GET", "/rooms", null, true)).status, 404);
     await f.call("POST", "/plugin/catalog", { models: [{ providerID: "probe", id: "fake", name: "Fake" }] }, true);

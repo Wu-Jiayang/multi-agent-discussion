@@ -155,6 +155,7 @@ async function main() {
     assert.match(bridge.endpoint, /^http:\/\/127\.0\.0\.1:/);
     const bridgeHealth = await fetch(bridge.endpoint + "/health", { headers: { authorization: `Bearer ${bridge.token}` } });
     assert.equal(bridgeHealth.status, 200);
+    assert.equal((await bridgeHealth.json()).version, "0.1.1");
     console.log("Discussion plugin:", JSON.stringify((await oc("/api/plugin")).data.find(plugin => plugin.id === "multi-agent-discussion")));
     await until(async () => (await service("GET", "/models")).models.some(model => model.providerID === "probe"), "model catalog");
 
@@ -214,6 +215,7 @@ async function main() {
 
     const health = await oc("/api/rpc/multi-agent-discussion/health", { input: {} }, "POST");
     assert.equal((health.output || health.data || health).plugin, "multi-agent-discussion");
+    assert.equal((health.output || health.data || health).version, "0.1.1");
 
     const first = await service("POST", `/rooms/${roomId}/messages`, { text: "真人首帖：请审查这个方案。" });
     try {
