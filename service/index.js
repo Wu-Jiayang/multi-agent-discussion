@@ -9316,6 +9316,16 @@ function cleanText(value, label, { required = true, maxChars = 2e4 } = {}) {
   if (text.length > maxChars) fail("ROOM_INVALID_INPUT", `${label} is too long.`, { maxChars });
   return text;
 }
+function executionErrorMessage(error) {
+  if (typeof error === "string") return error.slice(0, 2e3);
+  const message = error?.message || error?.response?.body || error?.type || "Agent execution failed";
+  return String(message).slice(0, 2e3);
+}
+function failureBackoffMs(count) {
+  if (count <= 1) return 3e4;
+  if (count === 2) return 6e4;
+  return 12e4;
+}
 function page(value, fallback, max) {
   if (value == null) return fallback;
   const number = Number(value);
@@ -9361,7 +9371,9 @@ var RoomStore = class {
         idle_epoch INTEGER NOT NULL DEFAULT 0, last_status TEXT,
         last_started_event TEXT, last_terminal_round INTEGER NOT NULL DEFAULT -1,
         next_attempt_at TEXT, task_error TEXT, task_attempts INTEGER NOT NULL DEFAULT 0,
-        session_linked INTEGER NOT NULL DEFAULT 0
+        session_linked INTEGER NOT NULL DEFAULT 0, model_synced INTEGER NOT NULL DEFAULT 1,
+        failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, last_error_at TEXT,
+        wake_backoff_until TEXT
       );
       CREATE UNIQUE INDEX IF NOT EXISTS members_session ON members(session_id) WHERE session_id IS NOT NULL;
       CREATE TABLE IF NOT EXISTS messages (
@@ -9417,7 +9429,8 @@ var RoomStore = class {
         before_json TEXT, after_json TEXT, created_at TEXT NOT NULL
       );
     `);
-    const previousSchema = this.db.prepare("SELECT value FROM meta WHERE key='schema'").get()?.value || "0";
+    const schemaVersion = 6;
+    const previousSchema = Number(this.db.prepare("SELECT value FROM meta WHERE key='schema'").get()?.value || 0);
     const roomColumns = new Set(this.db.prepare("PRAGMA table_info(rooms)").all().map((row) => row.name));
     for (const [name, definition] of Object.entries({
       root_session_id: "TEXT",
@@ -9433,14 +9446,28 @@ var RoomStore = class {
       if (!reminderColumns.has(name)) this.db.exec(`ALTER TABLE reminders ADD COLUMN ${name} ${definition}`);
     }
     const memberColumns = new Set(this.db.prepare("PRAGMA table_info(members)").all().map((row) => row.name));
-    for (const [name, definition] of Object.entries({ next_attempt_at: "TEXT", task_error: "TEXT", task_attempts: "INTEGER NOT NULL DEFAULT 0", session_linked: "INTEGER NOT NULL DEFAULT 0" })) {
+    for (const [name, definition] of Object.entries({
+      next_attempt_at: "TEXT",
+      task_error: "TEXT",
+      task_attempts: "INTEGER NOT NULL DEFAULT 0",
+      session_linked: "INTEGER NOT NULL DEFAULT 0",
+      model_synced: "INTEGER NOT NULL DEFAULT 1",
+      failure_count: "INTEGER NOT NULL DEFAULT 0",
+      last_error: "TEXT",
+      last_error_at: "TEXT",
+      wake_backoff_until: "TEXT"
+    })) {
       if (!memberColumns.has(name)) this.db.exec(`ALTER TABLE members ADD COLUMN ${name} ${definition}`);
+    }
+    if (previousSchema < schemaVersion) {
+      this.db.exec("UPDATE members SET session_linked=0 WHERE kind='agent' AND session_id IS NOT NULL");
+      this.db.exec("UPDATE rooms SET root_creation_status='pending',root_creation_error='\u6B63\u5728\u66F4\u65B0\u4F1A\u8BDD\u7EC4\u8BF4\u660E',root_next_attempt_at=NULL WHERE status<>'ended' AND root_creation_status='ready' AND root_session_id IS NOT NULL");
     }
     const presentationColumns = new Set(this.db.prepare("PRAGMA table_info(presentations)").all().map((row) => row.name));
     if (!presentationColumns.has("observed_at")) this.db.exec("ALTER TABLE presentations ADD COLUMN observed_at TEXT");
     const periodColumns = new Set(this.db.prepare("PRAGMA table_info(budget_periods)").all().map((row) => row.name));
     if (!periodColumns.has("used_count")) this.db.exec("ALTER TABLE budget_periods ADD COLUMN used_count INTEGER NOT NULL DEFAULT 0");
-    if (previousSchema !== "3") {
+    if (previousSchema < 3) {
       this.db.exec(`
         UPDATE reminders SET charged=0 WHERE refunded=1;
         UPDATE reminders SET charged=0,refunded=1 WHERE status IN ('failed','covered','cancelled');
@@ -9453,7 +9480,9 @@ var RoomStore = class {
           WHERE budget_periods.room_id=rooms.id AND budget_periods.period=rooms.budget_period));
       `);
     }
-    this.db.prepare("INSERT INTO meta(key,value) VALUES('schema','4') ON CONFLICT(key) DO UPDATE SET value='4'").run();
+    if (previousSchema < schemaVersion) {
+      this.db.prepare("INSERT INTO meta(key,value) VALUES('schema',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(schemaVersion));
+    }
   }
   close() {
     this.db.close();
@@ -9539,6 +9568,11 @@ var RoomStore = class {
       creationError: member.creation_error,
       taskError: member.task_error,
       sessionLinked: member.session_linked === 1,
+      modelSynced: member.model_synced === 1,
+      failureCount: member.failure_count,
+      lastError: member.last_error,
+      lastErrorAt: member.last_error_at,
+      wakeBackoffUntil: member.wake_backoff_until,
       sessionStatus: member.last_status || "unknown"
     };
   }
@@ -9714,6 +9748,31 @@ ${members.map((m) => `- ${m.display_name} \xB7 ${m.kind === "agent" ? "Agent" : 
       this.configEvent(roomId, "member-renamed", { memberId, displayName: before.display_name }, { memberId, displayName: name });
     });
     return this.memberView(this.member(memberId));
+  }
+  changeMemberModel(roomId, memberId, model, now = (/* @__PURE__ */ new Date()).toISOString()) {
+    const room = this.room(roomId);
+    if (room.status === "ended") fail("ROOM_ENDED", "The room has ended.");
+    const member = this.member(memberId);
+    if (member.room_id !== roomId || member.kind !== "agent") fail("ROOM_NOT_FOUND", "Agent member not found.", {}, 404);
+    if (!model || typeof model.providerID !== "string" || typeof model.id !== "string") fail("ROOM_INVALID_INPUT", "A model needs providerID and id.");
+    const normalized = {
+      providerID: model.providerID,
+      id: model.id,
+      name: model.name || model.id,
+      providerName: model.providerName || model.provider?.name || model.providerID,
+      ...model.variant ? { variant: model.variant } : {}
+    };
+    this.tx(() => {
+      this.db.prepare(`UPDATE members SET model_json=?,model_synced=CASE WHEN session_id IS NULL THEN 1 ELSE 0 END,
+        failure_count=0,last_error=NULL,last_error_at=NULL,wake_backoff_until=NULL,next_attempt_at=NULL,task_error=NULL WHERE id=? AND room_id=?`).run(json(normalized), memberId, roomId);
+      this.configEvent(roomId, "member-model-changed", { memberId, model: parse(member.model_json) }, { memberId, model: normalized }, now);
+    });
+    return this.memberView(this.member(memberId));
+  }
+  sessionModelSynced(roomId, memberId) {
+    this.room(roomId);
+    this.member(memberId);
+    this.db.prepare("UPDATE members SET model_synced=1,next_attempt_at=NULL,task_error=NULL WHERE id=? AND room_id=?").run(memberId, roomId);
   }
   validateMentions(roomId, authorId, input) {
     const ids = input.mentionMemberIds == null ? [] : input.mentionMemberIds;
@@ -10297,13 +10356,20 @@ ${parse(row.options_json, []).map((option, index) => `${index + 1}. ${option}`).
       return this.db.prepare("SELECT * FROM reminders WHERE id=?").get(reminderId);
     });
   }
-  markSubmitting(reminderId, now = (/* @__PURE__ */ new Date()).toISOString()) {
+  markSubmitting(reminderId, now = (/* @__PURE__ */ new Date()).toISOString(), executionRound = null) {
     const leaseUntil = new Date(Date.parse(now) + 15e3).toISOString();
-    this.db.prepare("UPDATE reminders SET status='submitting',updated_at=?,lease_until=? WHERE id=?").run(now, leaseUntil, reminderId);
+    this.db.prepare("UPDATE reminders SET status='submitting',execution_round=COALESCE(?,execution_round),updated_at=?,lease_until=? WHERE id=?").run(executionRound, now, leaseUntil, reminderId);
   }
   recoverExpiredReminders(now = (/* @__PURE__ */ new Date()).toISOString()) {
     this.db.prepare("UPDATE reminders SET status='unknown',last_error='Unfinished reservation recovered; retry with the same input ID' WHERE status='reserved'").run();
     this.db.prepare("UPDATE reminders SET status='unknown',last_error='Submission lease expired; retry with the same input ID' WHERE status='submitting' AND lease_until<?").run(now);
+  }
+  refundAcceptedRemindersForRound(memberId, executionRound, now = (/* @__PURE__ */ new Date()).toISOString()) {
+    return this.tx(() => {
+      const reminders = this.db.prepare("SELECT * FROM reminders WHERE member_id=? AND execution_round=? AND status='accepted' AND charged=1 AND refunded=0 ORDER BY created_at").all(memberId, executionRound);
+      for (const reminder of reminders) this.refundReminderInTx(reminder, now);
+      return reminders.map((reminder) => this.db.prepare("SELECT * FROM reminders WHERE id=?").get(reminder.id));
+    });
   }
   ackReminder(reminderId, outcome, error = null, now = (/* @__PURE__ */ new Date()).toISOString()) {
     return this.tx(() => {
@@ -10355,8 +10421,9 @@ ${parse(row.options_json, []).map((option, index) => `${index + 1}. ${option}`).
   dueReminders(roomId = null, limit = 20, now = (/* @__PURE__ */ new Date()).toISOString()) {
     const where = `(r.status IN ('pending','reserved','unknown') OR (r.status='submitting' AND r.lease_until<?))
       AND (r.next_attempt_at IS NULL OR r.next_attempt_at<=?)
+      AND (m.wake_backoff_until IS NULL OR m.wake_backoff_until<=?)
       AND (rm.status='ready' OR (rm.status='paused' AND rm.paused_reason='budget' AND r.charged=1 AND r.refunded=0))`;
-    const rows = roomId ? this.db.prepare(`SELECT r.* FROM reminders r JOIN rooms rm ON rm.id=r.room_id WHERE r.room_id=? AND ${where} ORDER BY CASE r.kind WHEN 'steer' THEN 0 ELSE 1 END,r.created_at LIMIT ?`).all(roomId, now, now, limit) : this.db.prepare(`SELECT r.* FROM reminders r JOIN rooms rm ON rm.id=r.room_id WHERE ${where} ORDER BY CASE r.kind WHEN 'steer' THEN 0 ELSE 1 END,r.created_at LIMIT ?`).all(now, now, limit);
+    const rows = roomId ? this.db.prepare(`SELECT r.* FROM reminders r JOIN rooms rm ON rm.id=r.room_id JOIN members m ON m.id=r.member_id WHERE r.room_id=? AND ${where} ORDER BY CASE r.kind WHEN 'steer' THEN 0 ELSE 1 END,r.created_at LIMIT ?`).all(roomId, now, now, now, limit) : this.db.prepare(`SELECT r.* FROM reminders r JOIN rooms rm ON rm.id=r.room_id JOIN members m ON m.id=r.member_id WHERE ${where} ORDER BY CASE r.kind WHEN 'steer' THEN 0 ELSE 1 END,r.created_at LIMIT ?`).all(now, now, now, limit);
     return rows.map((row) => ({ ...row, room: this.room(row.room_id), member: this.member(row.member_id) }));
   }
   reminderView(reminder) {
@@ -10384,7 +10451,7 @@ ${parse(row.options_json, []).map((option, index) => `${index + 1}. ${option}`).
     this.room(roomId);
     return this.db.prepare("SELECT * FROM reminders WHERE room_id=? ORDER BY created_at DESC LIMIT ?").all(roomId, limit).map((row) => this.reminderView(row));
   }
-  executionEvent(sessionID, type, eventID = null, now = (/* @__PURE__ */ new Date()).toISOString()) {
+  executionEvent(sessionID, type, eventID = null, error = null, now = (/* @__PURE__ */ new Date()).toISOString()) {
     const member = this.memberBySession(sessionID);
     if (type === "started") {
       if (eventID && member.last_started_event === eventID) return { changed: false, member };
@@ -10392,9 +10459,28 @@ ${parse(row.options_json, []).map((option, index) => `${index + 1}. ${option}`).
       return { changed: true, member: this.member(member.id), terminal: false };
     }
     if (["succeeded", "failed", "interrupted"].includes(type)) {
-      if (member.last_terminal_round === member.execution_round) return { changed: false, member, terminal: true };
-      this.db.prepare("UPDATE members SET last_status='running',last_terminal_round=execution_round WHERE id=?").run(member.id);
-      return { changed: true, member: this.member(member.id), terminal: true };
+      if (member.last_terminal_round === member.execution_round) {
+        if (type === "failed" && error) {
+          const message = executionErrorMessage(error);
+          if (message !== member.last_error) {
+            const retryAt = new Date(Date.parse(now) + failureBackoffMs(member.failure_count)).toISOString();
+            this.db.prepare("UPDATE members SET last_error=?,last_error_at=?,wake_backoff_until=? WHERE id=?").run(message, now, retryAt, member.id);
+            return { changed: true, member: this.member(member.id), terminal: true, error: message };
+          }
+        }
+        return { changed: false, member, terminal: true };
+      }
+      if (type === "succeeded") {
+        this.db.prepare("UPDATE members SET last_status='running',last_terminal_round=execution_round,failure_count=0,last_error=NULL,last_error_at=NULL,wake_backoff_until=NULL WHERE id=?").run(member.id);
+      } else if (type === "failed") {
+        const message = executionErrorMessage(error);
+        const failures = member.failure_count + 1;
+        const retryAt = new Date(Date.parse(now) + failureBackoffMs(failures)).toISOString();
+        this.db.prepare("UPDATE members SET last_status='running',last_terminal_round=execution_round,failure_count=?,last_error=?,last_error_at=?,wake_backoff_until=? WHERE id=?").run(failures, message, now, retryAt, member.id);
+      } else {
+        this.db.prepare("UPDATE members SET last_status='running',last_terminal_round=execution_round WHERE id=?").run(member.id);
+      }
+      return { changed: true, member: this.member(member.id), terminal: true, error: type === "failed" ? executionErrorMessage(error) : null };
     }
     return { changed: false, member, terminal: false };
   }
@@ -10429,6 +10515,7 @@ ${parse(row.options_json, []).map((option, index) => `${index + 1}. ${option}`).
       this.db.prepare("UPDATE budget_periods SET ended_at=?,reason=? WHERE room_id=? AND period=?").run(now, room.paused_reason, roomId, room.budget_period);
       this.db.prepare("UPDATE rooms SET status=?,paused_reason=NULL,budget_period=?,budget_limit=?,budget_remaining=? WHERE id=?").run(ready === total ? "ready" : "creating", period, budgetLimit, budgetLimit, roomId);
       this.db.prepare("INSERT INTO budget_periods(room_id,period,limit_count,started_at) VALUES(?,?,?,?)").run(roomId, period, budgetLimit, now);
+      this.db.prepare("UPDATE members SET failure_count=0,last_error=NULL,last_error_at=NULL,wake_backoff_until=NULL WHERE room_id=? AND kind='agent'").run(roomId);
       this.configEvent(roomId, "room-resumed", { period: room.budget_period, remaining: room.budget_remaining }, { period, limit: budgetLimit });
       return this.roomSummary(this.room(roomId));
     });
@@ -10475,6 +10562,12 @@ function summarizeToolResult(result) {
     previewCount: Array.isArray(items) ? items.filter((item) => item?.preview || item?.full === false).length : null,
     unread: result.unread || null
   };
+}
+function isProviderQuotaError(error) {
+  if (!error) return false;
+  if (error.status === 402) return true;
+  const text = `${error.type || ""} ${error.message || ""} ${error.response?.body || ""}`.toLowerCase();
+  return /insufficient balance|free usage limit reached|quota exceeded|payment required|额度不足|余额不足/.test(text);
 }
 function reminderText(reminder) {
   const mentions = reminder.unread_mentions || [];
@@ -10600,6 +10693,7 @@ var RoomEngine = class {
     const room = this.store.room(roomId);
     const member = this.store.member(memberId);
     if (room.status !== "ready" || member.creation_status !== "ready") return null;
+    if (member.wake_backoff_until && Date.parse(member.wake_backoff_until) > Date.parse(this.now())) return null;
     const before = this.store.unreadSummary(roomId, memberId, []);
     if (!before.unreadCount) return null;
     const status = await this.queryStatus(member);
@@ -10723,16 +10817,28 @@ var RoomEngine = class {
     this.changed(roomId);
     return member;
   }
-  executionEvent(sessionID, type, eventID) {
+  changeModel(roomId, memberId, model) {
+    const member = this.store.changeMemberModel(roomId, memberId, model, this.now());
+    this.changed(roomId);
+    return member;
+  }
+  executionEvent(sessionID, type, eventID, error = null) {
     let member;
     try {
       member = this.store.memberBySession(sessionID);
     } catch {
       return;
     }
-    const result = this.store.executionEvent(sessionID, type, eventID, this.now());
-    if (result.changed) this.store.diagnostic("execution-event", { roomId: member.room_id, memberId: member.id, sessionId: sessionID, type, eventId: eventID || null, changed: true });
-    if (result.terminal) {
+    const now = this.now();
+    const result = this.store.executionEvent(sessionID, type, eventID, error, now);
+    if (result.changed) this.store.diagnostic("execution-event", { roomId: member.room_id, memberId: member.id, sessionId: sessionID, type, eventId: eventID || null, error: result.error, changed: true });
+    if (result.terminal && type === "failed") {
+      if (isProviderQuotaError(error)) {
+        const refunded = this.store.refundAcceptedRemindersForRound(member.id, result.member.execution_round, now);
+        if (this.store.room(member.room_id).status !== "ended") this.store.pauseRoom(member.room_id, "provider-quota", now);
+        this.store.diagnostic("provider-quota-pause", { roomId: member.room_id, memberId: member.id, sessionId: sessionID, error: result.error, refundedReminderIds: refunded.map((reminder) => reminder.id) });
+      }
+    } else if (result.terminal) {
       this.checkMemberLater(member.room_id, member.id);
       const retry = setTimeout(() => this.checkMemberLater(member.room_id, member.id), 100);
       retry.unref?.();
@@ -10757,7 +10863,7 @@ var RoomEngine = class {
       this.waitKinds.delete(sessionID);
     } else if (event.type === "turn-finished" || event.type === "turn-failed") {
       this.waitKinds.delete(sessionID);
-      this.executionEvent(sessionID, event.type === "turn-finished" ? "succeeded" : "failed", `host:${event.id}`);
+      this.executionEvent(sessionID, event.type === "turn-finished" ? "succeeded" : "failed", `host:${event.id}`, event.error || null);
     }
   }
   async tool(sessionID, name, input = {}) {
@@ -10837,7 +10943,7 @@ var RoomEngine = class {
           title: `${room.title} \xB7 \u8BA8\u8BBA\u5BA4`,
           directory: room.project_dir,
           metadata: { discussionRoomId: roomId, discussionRoot: true },
-          note: `\u8FD9\u662F\u201C${room.title}\u201D\u7684\u8BA8\u8BBA\u5BA4\u4F1A\u8BDD\u7EC4\u3002\u6210\u5458\u4F1A\u8BDD\u4E0D\u4F1A\u663E\u793A\u5728\u4FA7\u680F\uFF0C\u8BF7\u4ECE\u201C\u591A\u667A\u80FD\u4F53\u8BA8\u8BBA\u5BA4\u201D\u9875\u9762\u4E2D\u7684\u6210\u5458\u201C\u4F1A\u8BDD\u201D\u6309\u94AE\u6253\u5F00\u3002\u623F\u95F4\u81EA\u52A8\u8C03\u5EA6\u4E0D\u4F1A\u5411\u672C\u4F1A\u8BDD\u8C03\u7528\u6A21\u578B\uFF1B\u8BF7\u52FF\u76F4\u63A5\u5411\u672C\u4F1A\u8BDD\u53D1\u9001\u8BAE\u9898\u3002`
+          note: `\u8FD9\u662F\u201C${room.title}\u201D\u7684\u8BA8\u8BBA\u5BA4\u4F1A\u8BDD\u7EC4\u3002\u6210\u5458\u4F1A\u8BDD\u663E\u793A\u5728\u672C\u4F1A\u8BDD\u4E0B\u65B9\uFF0C\u4E5F\u53EF\u4EE5\u4ECE\u201C\u591A\u667A\u80FD\u4F53\u8BA8\u8BBA\u5BA4\u201D\u9875\u9762\u4E2D\u7684\u6210\u5458\u201C\u4F1A\u8BDD\u201D\u6309\u94AE\u76F4\u63A5\u6253\u5F00\u3002\u623F\u95F4\u81EA\u52A8\u8C03\u5EA6\u4E0D\u4F1A\u5411\u672C\u4F1A\u8BDD\u8C03\u7528\u6A21\u578B\uFF1B\u8BF7\u52FF\u76F4\u63A5\u5411\u672C\u4F1A\u8BDD\u53D1\u9001\u8BAE\u9898\u3002`
         };
       }
       for (const member of this.store.agents(roomId)) {
@@ -10845,7 +10951,7 @@ var RoomEngine = class {
         const metadata = {
           discussionRoomId: roomId,
           discussionMemberId: member.id,
-          ...rootReady ? { openchamber: { kind: "workflow-agent", parentID: room.root_session_id } } : {}
+          ...rootReady ? { openchamber: { kind: "operator-child", parentID: room.root_session_id } } : {}
         };
         const title = `${room.title} \xB7 ${member.display_name}`;
         if (member.session_id && !member.session_linked && rootReady) {
@@ -10853,6 +10959,10 @@ var RoomEngine = class {
           return { jobId: `link:${roomId}:${member.id}`, type: "link-session", roomId, memberId: member.id, sessionId: member.session_id, title, metadata };
         }
         if (room.status === "ended") continue;
+        if (member.session_id && !member.model_synced) {
+          this.store.taskAttempt(roomId, member.id, now);
+          return { jobId: `model:${roomId}:${member.id}`, type: "change-session-model", roomId, memberId: member.id, sessionId: member.session_id, model: JSON.parse(member.model_json) };
+        }
         if (!member.session_id && member.creation_status === "pending") {
           this.store.taskAttempt(roomId, member.id, now);
           return {
@@ -10925,16 +11035,18 @@ var RoomEngine = class {
         this.store.cancelReminder(candidate.id, "Messages were read before dispatch");
         continue;
       }
+      const retryUnknown = reminder.status === "unknown";
+      const executionRound = retryUnknown ? reminder.execution_round : member.execution_round + (status === "idle" ? 1 : 0);
       const reserved = this.store.reserveReminder(reminder.id, this.now());
       if (!reserved) continue;
-      this.store.markSubmitting(reminder.id, this.now());
+      this.store.markSubmitting(reminder.id, this.now(), executionRound);
       const summary = this.store.unreadSummary(reminder.room_id, reminder.member_id, []);
       if (!summary.unreadCount) {
         this.store.ackReminder(reminder.id, "failed", "Messages were read before submission");
         continue;
       }
       const payload = { ...reminder, unread_count: summary.unreadCount, unread_mention_count: summary.unreadMentionCount, unread_mentions: summary.unreadMentions };
-      this.store.diagnostic("reminder-submitting", { roomId: reminder.room_id, memberId: reminder.member_id, reminderId: reminder.id, kind: reminder.kind, snapshotSeq: reminder.snapshot_seq, unreadCount: summary.unreadCount, budgetRemaining: this.store.room(reminder.room_id).budget_remaining });
+      this.store.diagnostic("reminder-submitting", { roomId: reminder.room_id, memberId: reminder.member_id, reminderId: reminder.id, kind: reminder.kind, snapshotSeq: reminder.snapshot_seq, executionRound, unreadCount: summary.unreadCount, budgetRemaining: this.store.room(reminder.room_id).budget_remaining });
       this.changed(reminder.room_id);
       return {
         jobId: reminder.id,
@@ -10961,6 +11073,9 @@ var RoomEngine = class {
     } else if (job.type === "link-session") {
       if (outcome === "accepted") this.store.sessionLinked(job.roomId, job.memberId);
       else this.store.taskFailed(job.roomId, job.memberId, result.error || "Session grouping failed", this.now());
+    } else if (job.type === "change-session-model") {
+      if (outcome === "accepted") this.store.sessionModelSynced(job.roomId, job.memberId);
+      else this.store.taskFailed(job.roomId, job.memberId, result.error || "Model switch failed", this.now());
     } else if (job.type === "put-instructions") {
       if (outcome === "accepted") this.store.instructionsAdded(job.roomId, job.memberId);
       else if (!this.store.member(job.memberId).instructions_added) this.store.taskFailed(job.roomId, job.memberId, result.error || "Instruction update failed", this.now());
@@ -10985,7 +11100,7 @@ var RoomEngine = class {
 };
 
 // src/service/main.mjs
-var VERSION = "0.1.1";
+var VERSION = "0.1.2";
 var MAX_BODY = 1024 * 1024;
 function packageRoot() {
   return resolve(fileURLToPath(new URL("../", import.meta.url)));
@@ -11194,7 +11309,7 @@ function createDiscussionService(options = {}) {
       if (req.method === "POST" && url.pathname === "/plugin/event") {
         const event = await body(req);
         const type = event.type.replace("session.execution.", "");
-        engine.executionEvent(event.data?.sessionID, type, event.id || (event.durable?.seq ? `${type}:${event.durable.seq}` : null));
+        engine.executionEvent(event.data?.sessionID, type, event.id || (event.durable?.seq ? `${type}:${event.durable.seq}` : null), event.data?.error || null);
         return json2(res, 200, { ok: true });
       }
       if (req.method === "POST" && url.pathname === "/plugin/observe") {
@@ -11288,6 +11403,11 @@ function createDiscussionService(options = {}) {
       return json2(res, 200, engine.resume(roomId, Number(input.budgetLimit) || 50));
     }
     if (req.method === "POST" && rest === "end") return json2(res, 200, engine.end(roomId));
+    const modelMatch = rest.match(/^members\/([^/]+)\/model$/);
+    if (req.method === "POST" && modelMatch) {
+      const input = await body(req);
+      return json2(res, 200, engine.changeModel(roomId, decodeURIComponent(modelMatch[1]), input.model));
+    }
     const renameMatch = rest.match(/^members\/([^/]+)\/rename$/);
     if (req.method === "POST" && renameMatch) {
       const input = await body(req);

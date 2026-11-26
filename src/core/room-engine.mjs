@@ -13,6 +13,12 @@ function summarizeToolResult(result) {
   };
 }
 
+function isProviderQuotaError(error) {
+  if (!error) return false;
+  if (error.status === 402) return true;
+  const text = `${error.type || ""} ${error.message || ""} ${error.response?.body || ""}`.toLowerCase();
+  return /insufficient balance|free usage limit reached|quota exceeded|payment required|额度不足|余额不足/.test(text);
+}
 function reminderText(reminder) {
   const mentions = reminder.unread_mentions || [];
   const lines = [
@@ -144,6 +150,7 @@ export class RoomEngine {
     const room = this.store.room(roomId);
     const member = this.store.member(memberId);
     if (room.status !== "ready" || member.creation_status !== "ready") return null;
+    if (member.wake_backoff_until && Date.parse(member.wake_backoff_until) > Date.parse(this.now())) return null;
     const before = this.store.unreadSummary(roomId, memberId, []);
     if (!before.unreadCount) return null;
     const status = await this.queryStatus(member);
@@ -267,12 +274,25 @@ export class RoomEngine {
     return member;
   }
 
-  executionEvent(sessionID, type, eventID) {
+  changeModel(roomId, memberId, model) {
+    const member = this.store.changeMemberModel(roomId, memberId, model, this.now());
+    this.changed(roomId);
+    return member;
+  }
+
+  executionEvent(sessionID, type, eventID, error = null) {
     let member;
     try { member = this.store.memberBySession(sessionID); } catch { return; }
-    const result = this.store.executionEvent(sessionID, type, eventID, this.now());
-    if (result.changed) this.store.diagnostic("execution-event", { roomId: member.room_id, memberId: member.id, sessionId: sessionID, type, eventId: eventID || null, changed: true });
-    if (result.terminal) {
+    const now = this.now();
+    const result = this.store.executionEvent(sessionID, type, eventID, error, now);
+    if (result.changed) this.store.diagnostic("execution-event", { roomId: member.room_id, memberId: member.id, sessionId: sessionID, type, eventId: eventID || null, error: result.error, changed: true });
+    if (result.terminal && type === "failed") {
+      if (isProviderQuotaError(error)) {
+        const refunded = this.store.refundAcceptedRemindersForRound(member.id, result.member.execution_round, now);
+        if (this.store.room(member.room_id).status !== "ended") this.store.pauseRoom(member.room_id, "provider-quota", now);
+        this.store.diagnostic("provider-quota-pause", { roomId: member.room_id, memberId: member.id, sessionId: sessionID, error: result.error, refundedReminderIds: refunded.map(reminder => reminder.id) });
+      }
+    } else if (result.terminal) {
       this.checkMemberLater(member.room_id, member.id);
       const retry = setTimeout(() => this.checkMemberLater(member.room_id, member.id), 100);
       retry.unref?.();
@@ -294,7 +314,7 @@ export class RoomEngine {
       this.waitKinds.delete(sessionID);
     } else if (event.type === "turn-finished" || event.type === "turn-failed") {
       this.waitKinds.delete(sessionID);
-      this.executionEvent(sessionID, event.type === "turn-finished" ? "succeeded" : "failed", `host:${event.id}`);
+      this.executionEvent(sessionID, event.type === "turn-finished" ? "succeeded" : "failed", `host:${event.id}`, event.error || null);
     }
   }
 
@@ -365,7 +385,7 @@ export class RoomEngine {
           jobId: `root:${roomId}`, type: "create-root-session", roomId,
           sessionId: room.root_session_id, title: `${room.title} · 讨论室`, directory: room.project_dir,
           metadata: { discussionRoomId: roomId, discussionRoot: true },
-          note: `这是“${room.title}”的讨论室会话组。成员会话不会显示在侧栏，请从“多智能体讨论室”页面中的成员“会话”按钮打开。房间自动调度不会向本会话调用模型；请勿直接向本会话发送议题。`,
+          note: `这是“${room.title}”的讨论室会话组。成员会话显示在本会话下方，也可以从“多智能体讨论室”页面中的成员“会话”按钮直接打开。房间自动调度不会向本会话调用模型；请勿直接向本会话发送议题。`,
         };
       }
       for (const member of this.store.agents(roomId)) {
@@ -373,7 +393,7 @@ export class RoomEngine {
         const metadata = {
           discussionRoomId: roomId,
           discussionMemberId: member.id,
-          ...(rootReady ? { openchamber: { kind: "workflow-agent", parentID: room.root_session_id } } : {}),
+          ...(rootReady ? { openchamber: { kind: "operator-child", parentID: room.root_session_id } } : {}),
         };
         const title = `${room.title} · ${member.display_name}`;
         if (member.session_id && !member.session_linked && rootReady) {
@@ -381,6 +401,10 @@ export class RoomEngine {
           return { jobId: `link:${roomId}:${member.id}`, type: "link-session", roomId, memberId: member.id, sessionId: member.session_id, title, metadata };
         }
         if (room.status === "ended") continue;
+        if (member.session_id && !member.model_synced) {
+          this.store.taskAttempt(roomId, member.id, now);
+          return { jobId: `model:${roomId}:${member.id}`, type: "change-session-model", roomId, memberId: member.id, sessionId: member.session_id, model: JSON.parse(member.model_json) };
+        }
         if (!member.session_id && member.creation_status === "pending") {
           this.store.taskAttempt(roomId, member.id, now);
           return {
@@ -440,13 +464,16 @@ export class RoomEngine {
       }
       reminder = this.store.refreshReminder(reminder.id, this.now());
       if (!reminder?.unread_count) { this.store.cancelReminder(candidate.id, "Messages were read before dispatch"); continue; }
+      // Queue starts the next round; steer joins the running round. Unknown retries keep the first recorded target.
+      const retryUnknown = reminder.status === "unknown";
+      const executionRound = retryUnknown ? reminder.execution_round : member.execution_round + (status === "idle" ? 1 : 0);
       const reserved = this.store.reserveReminder(reminder.id, this.now());
       if (!reserved) continue;
-      this.store.markSubmitting(reminder.id, this.now());
+      this.store.markSubmitting(reminder.id, this.now(), executionRound);
       const summary = this.store.unreadSummary(reminder.room_id, reminder.member_id, []);
       if (!summary.unreadCount) { this.store.ackReminder(reminder.id, "failed", "Messages were read before submission"); continue; }
       const payload = { ...reminder, unread_count: summary.unreadCount, unread_mention_count: summary.unreadMentionCount, unread_mentions: summary.unreadMentions };
-      this.store.diagnostic("reminder-submitting", { roomId: reminder.room_id, memberId: reminder.member_id, reminderId: reminder.id, kind: reminder.kind, snapshotSeq: reminder.snapshot_seq, unreadCount: summary.unreadCount, budgetRemaining: this.store.room(reminder.room_id).budget_remaining });
+      this.store.diagnostic("reminder-submitting", { roomId: reminder.room_id, memberId: reminder.member_id, reminderId: reminder.id, kind: reminder.kind, snapshotSeq: reminder.snapshot_seq, executionRound, unreadCount: summary.unreadCount, budgetRemaining: this.store.room(reminder.room_id).budget_remaining });
       this.changed(reminder.room_id);
       return {
         jobId: reminder.id, type: "submit-reminder", roomId: reminder.room_id, memberId: reminder.member_id,
@@ -469,6 +496,9 @@ export class RoomEngine {
     } else if (job.type === "link-session") {
       if (outcome === "accepted") this.store.sessionLinked(job.roomId, job.memberId);
       else this.store.taskFailed(job.roomId, job.memberId, result.error || "Session grouping failed", this.now());
+    } else if (job.type === "change-session-model") {
+      if (outcome === "accepted") this.store.sessionModelSynced(job.roomId, job.memberId);
+      else this.store.taskFailed(job.roomId, job.memberId, result.error || "Model switch failed", this.now());
     } else if (job.type === "put-instructions") {
       if (outcome === "accepted") this.store.instructionsAdded(job.roomId, job.memberId);
       else if (!this.store.member(job.memberId).instructions_added) this.store.taskFailed(job.roomId, job.memberId, result.error || "Instruction update failed", this.now());

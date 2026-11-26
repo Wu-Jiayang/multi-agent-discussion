@@ -10,7 +10,7 @@ import { RoomEngine } from "../core/room-engine.mjs";
 import { asRoomError, RoomError } from "../core/errors.mjs";
 import { MAX_AGENT_MESSAGE_WIDTH, UNICODE_IMPLEMENTATION } from "../core/display-width.mjs";
 
-const VERSION = "0.1.1";
+const VERSION = "0.1.2";
 const MAX_BODY = 1024 * 1024;
 
 function packageRoot() {
@@ -203,7 +203,7 @@ export function createDiscussionService(options = {}) {
       if (req.method === "POST" && url.pathname === "/plugin/event") {
         const event = await body(req);
         const type = event.type.replace("session.execution.", "");
-        engine.executionEvent(event.data?.sessionID, type, event.id || (event.durable?.seq ? `${type}:${event.durable.seq}` : null));
+        engine.executionEvent(event.data?.sessionID, type, event.id || (event.durable?.seq ? `${type}:${event.durable.seq}` : null), event.data?.error || null);
         return json(res, 200, { ok: true });
       }
       if (req.method === "POST" && url.pathname === "/plugin/observe") {
@@ -298,6 +298,11 @@ export function createDiscussionService(options = {}) {
       return json(res, 200, engine.resume(roomId, Number(input.budgetLimit) || 50));
     }
     if (req.method === "POST" && rest === "end") return json(res, 200, engine.end(roomId));
+    const modelMatch = rest.match(/^members\/([^/]+)\/model$/);
+    if (req.method === "POST" && modelMatch) {
+      const input = await body(req);
+      return json(res, 200, engine.changeModel(roomId, decodeURIComponent(modelMatch[1]), input.model));
+    }
     const renameMatch = rest.match(/^members\/([^/]+)\/rename$/);
     if (req.method === "POST" && renameMatch) {
       const input = await body(req);

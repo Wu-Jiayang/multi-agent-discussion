@@ -203,6 +203,22 @@ function memberModelPill(member) {
   const label = `${info.provider} · ${info.name}${info.variant ? ` (${info.variant})` : ""}`;
   return `<span class="pill model" title="${escape(label)}">${escape(label)}</span>`;
 }
+function memberIssuePills(member) {
+  const pills = [];
+  if (member.lastError) {
+    const count = Number(member.failureCount);
+    pills.push(`<span class="pill error" title="${escape(member.lastError)}">模型调用失败${count > 1 ? ` ×${count}` : ""}</span>`);
+  }
+  if (member.wakeBackoffUntil) {
+    pills.push(`<span class="pill waiting-human" title="${escape(member.wakeBackoffUntil)}">退避至 ${escape(time(member.wakeBackoffUntil))}</span>`);
+  }
+  if (member.modelSynced === false) pills.push(`<span class="pill waiting-question">模型同步中</span>`);
+  return pills.join("");
+}
+function pausedReasonText(room) {
+  if (room.pausedReason === "provider-quota") return "模型额度或余额不足，自动唤醒已暂停。充值或更换模型后点击继续房间。";
+  return `自动唤醒已暂停（${room.pausedReason === "budget" ? "额度用尽" : "手动暂停"}）。发帖、阅读和提问仍可使用。`;
+}
 function modelSelectOptions() {
   return state.models.map(model => ({
     id: modelKey(model),
@@ -334,7 +350,7 @@ function renderCreate() {
   const preset = state.createPreset || "generic";
   $("#create-view").innerHTML = `
     <h1>新建讨论室</h1>
-    <p class="intro">每个房间创建一个根会话；成员会话不显示在侧栏，可从成员“会话”按钮打开。建房本身不会调用模型。</p>
+    <p class="intro">每个房间创建一个根会话；成员会话显示在根会话下方，也可从成员“会话”按钮打开。建房本身不会调用模型。</p>
     <div class="form-grid">
       <div class="field"><label>房间名称</label><input id="create-title" value="${escape(state.createTitle || "新的讨论室")}" maxlength="120"></div>
       <div class="field"><label>预设</label><select id="create-preset"><option value="generic" ${preset === "generic" ? "selected" : ""}>普通讨论</option><option value="debate" ${preset === "debate" ? "selected" : ""}>双模型辩论</option></select></div>
@@ -459,14 +475,14 @@ function renderRoomHeader() {
   const rootPill = rootStatus === "ready" ? "running" : rootStatus === "failed" ? "unknown" : "waiting-human";
   const rootChip = rootStatus || room.rootSessionId ? `<span class="member-chip root-session"><span>根会话</span>${rootStatus ? `<span class="pill ${rootPill}">${escape(rootStatusLabels[rootStatus] || rootStatus)}</span>` : ""}${room.rootSessionId ? `<button data-action="open-root-session" data-session="${escape(room.rootSessionId)}">会话组</button>` : ""}</span>` : "";
   $("#room-header").innerHTML = `
-    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">人类 · 房主</span></span>${room.members.map(member => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">创建失败：${escape(member.creationError || "未知原因")}</span>` : member.taskError ? `<span class="pill waiting-human">会话同步失败：${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">会话</button>` : ""}</span>`).join("")}</div></div>
+    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">人类 · 房主</span></span>${room.members.map(member => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">创建失败：${escape(member.creationError || "未知原因")}</span>` : `${member.taskError ? `<span class="pill waiting-human">会话同步失败：${escape(member.taskError)}</span>` : ""}${memberIssuePills(member)}<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">会话</button>` : ""}<button data-action="change-model" data-member="${escape(member.memberId)}">换模型</button></span>`).join("")}</div></div>
     <div class="room-controls">
       <button class="button ghost" data-action="open-workspace">文件</button>
       <span class="pill budget">余额 ${room.budget.remaining}/${room.budget.limit} · 第 ${room.budget.period} 段</span>
       ${room.status === "creating" ? `<button class="button secondary" data-action="retry">重试缺失会话</button>` : room.status !== "ended" ? `${paused ? `<button class="button primary" data-action="resume">继续房间</button>` : `<button class="button secondary" data-action="pause">暂停唤醒</button>`}<button class="button ghost danger" data-action="end">结束房间</button>` : ""}
     </div>
     ${rootStatus === "failed" ? `<div class="root-error">根会话创建失败：${escape(room.rootCreationError || "未知原因")}</div>` : ""}
-    ${paused && room.status !== "creating" ? `<div class="composer-hint">自动唤醒已暂停（${escape(room.pausedReason === "budget" ? "额度用尽" : "手动暂停")}）。发帖、阅读和提问仍可使用。</div>` : ""}
+    ${paused && room.status !== "creating" ? `<div class="composer-hint${room.pausedReason === "provider-quota" ? " provider-quota" : ""}">${escape(pausedReasonText(room))}</div>` : ""}
   `;
 }
 function renderAuthorFilter() {
@@ -680,6 +696,7 @@ async function openMessage(messageId) {
 }
 const modalSdkHandles = new Map();
 let fileBrowser = null;
+let memberModelPicker = null;
 function disposeModalSdk() {
   for (const handle of modalSdkHandles.values()) handle.dispose();
   modalSdkHandles.clear();
@@ -713,12 +730,86 @@ function fileName(path) {
 function textPreviewable(path) {
   return /\.(md|markdown|txt|log|csv)$/i.test(path);
 }
-function showModal(title, content) {
+function showModal(title, content, actions = "") {
   disposeModalSdk();
   fileBrowser = null;
-  $("#modal-content").innerHTML = `<h2>${escape(title)}</h2>${content}<div class="modal-actions"><button class="button secondary" data-action="close-modal">关闭</button></div>`;
+  memberModelPicker = null;
+  $("#modal-content").innerHTML = `<h2>${escape(title)}</h2>${content}<div class="modal-actions">${actions}<button class="button secondary" data-action="close-modal">关闭</button></div>`;
   $("#modal").classList.remove("file-browser-dialog");
   $("#modal").showModal();
+}
+function showEndRoomConfirmation() {
+  if (!state.roomId || state.room?.status === "ended") return;
+  showModal("结束房间", `<p>确定结束“${escape(state.room?.title || "当前房间")}”？</p><p class="composer-hint">会停止后续自动唤醒并移除本扩展添加的会话指令，但保留讨论记录和会话。</p>`, `<button class="button secondary danger" data-action="confirm-end-room">结束房间</button>`);
+}
+function showWithdrawQuestion(questionId) {
+  const question = state.questions.find(item => item.questionId === questionId);
+  if (!question || question.status !== "pending") return;
+  showModal("撤回问题", `<p>确定撤回“${escape(question.text)}”？</p><label class="field"><span>撤回说明（可留空）</span><textarea id="withdraw-note" maxlength="1000" placeholder="例如：与另一个问题重复"></textarea></label><p class="composer-hint">撤回后会更新问题状态，不会唤醒其他成员。</p>`, `<button class="button secondary danger" data-action="submit-withdraw" data-question="${escape(questionId)}">确认撤回</button>`);
+  $("#withdraw-note").focus();
+}
+function showChangeModel(member) {
+  if (!member || !state.roomId) return;
+  showModal(`更换模型 · ${member.displayName}`, `<p class="composer-hint">选择后会立即同步到该成员的会话。</p><div id="member-model-picker" class="model-picker modal-model-picker"></div>`, `<button class="button primary" data-action="submit-member-model">更换模型</button>`);
+  memberModelPicker = { memberId: member.memberId, displayName: member.displayName, modelKey: modelKey(member.model), submitting: false };
+  let picker;
+  picker = mountModalRoot($("#member-model-picker"), target => mountSelect(target, {
+    label: "模型",
+    value: memberModelPicker.modelKey || null,
+    options: modelSelectOptions(),
+    onChange: id => {
+      if (!memberModelPicker) return;
+      memberModelPicker.modelKey = id;
+      picker.update({ value: id });
+    },
+    placeholder: "请选择模型",
+    searchable: true,
+    searchPlaceholder: "搜索模型或提供商",
+    disabled: !state.models.length,
+  }));
+}
+async function submitMemberModel() {
+  if (!memberModelPicker || memberModelPicker.submitting || !state.roomId) return;
+  const member = state.room?.members.find(item => item.memberId === memberModelPicker.memberId);
+  const model = state.models.find(item => modelKey(item) === memberModelPicker.modelKey);
+  if (!member) return;
+  if (!model) return showError(new Error("请选择有效模型。"));
+  const body = { providerID: model.providerID, id: model.id, name: model.name || model.id, providerName: model.providerName || model.providerID, ...(model.variant ? { variant: model.variant } : {}) };
+  memberModelPicker.submitting = true;
+  try {
+    await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/members/${encodeURIComponent(member.memberId)}/model`, { model: body });
+    $("#modal").close();
+    await refreshRoom();
+    toast(`已将 ${member.displayName} 更换为 ${body.providerName} · ${body.name}${body.variant ? ` (${body.variant})` : ""}。`, "success");
+  } catch (error) {
+    if (memberModelPicker) memberModelPicker.submitting = false;
+    showError(error);
+  }
+}
+async function endRoom() {
+  if (!state.roomId || state.room?.status === "ended") return;
+  try {
+    await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/end`);
+    await refreshRoom();
+    renderComposer();
+    toast("房间已结束，讨论记录和会话已保留。", "success");
+  } catch (error) { showError(error); }
+}
+async function withdrawQuestion(questionId, note) {
+  if (!state.roomId) return;
+  try {
+    await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/questions/${encodeURIComponent(questionId)}/withdraw`, { note });
+    $("#modal").close();
+    state.questionSignature = ""; state.questionFirstSignature = ""; state.questionCursor = null;
+    await loadQuestions();
+  } catch (error) {
+    showError(error);
+    if (error.code === "ROOM_QUESTION_CONFLICT") {
+      $("#modal").close();
+      state.questionSignature = ""; state.questionFirstSignature = ""; state.questionCursor = null;
+      await Promise.all([refreshRoom(), loadQuestions()]);
+    }
+  }
 }
 function renderWorkspaceBreadcrumb() {
   if (!fileBrowser?.data) return;
@@ -934,16 +1025,16 @@ app.addEventListener("click", async event => {
     return;
   }
   if (action === "pause" || action === "resume" || action === "retry" || action === "end") {
+    if (action === "end") { showEndRoomConfirmation(); return; }
     try {
-      if (action === "end" && !confirm("结束房间？会停止后续自动唤醒并移除本扩展添加的会话指令，但保留讨论记录和会话。")) return;
       await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/${action}`, action === "resume" ? { budgetLimit: state.room?.budget.limit || 50 } : undefined);
       await refreshRoom();
       if (action === "resume") await loadTimeline(true);
-      if (action === "end") renderComposer();
     } catch (error) { showError(error); }
     return;
   }
   if (action === "open-session" || action === "open-root-session") { persistView(); await host.openSession(button.dataset.session); return; }
+  if (action === "change-model") { const member = state.room?.members.find(item => item.memberId === button.dataset.member); if (member) showChangeModel(member); return; }
   if (action === "reply") {
     const message = state.timeline.find(item => item.messageId === button.dataset.message);
     state.replyTo = message; renderComposerChips(); $("#composer-text")?.focus(); return;
@@ -966,18 +1057,7 @@ app.addEventListener("click", async event => {
   if (action === "open-workspace") { await openWorkspaceBrowser(); return; }
   if (action === "open-file") { await openWorkspaceBrowser(button.dataset.path); return; }
   if (action === "more-questions") { await loadQuestions(true); return; }
-  if (action === "withdraw-question") {
-    const note = prompt("撤回说明（可留空）", "");
-    if (note == null) return;
-    try {
-      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/questions/${encodeURIComponent(button.dataset.question)}/withdraw`, { note });
-      state.questionSignature = ""; state.questionFirstSignature = ""; state.questionCursor = null; await loadQuestions();
-    } catch (error) {
-      showError(error);
-      if (error.code === "ROOM_QUESTION_CONFLICT") { state.questionSignature = ""; state.questionFirstSignature = ""; state.questionCursor = null; await Promise.all([refreshRoom(), loadQuestions()]); }
-    }
-    return;
-  }
+  if (action === "withdraw-question") { showWithdrawQuestion(button.dataset.question); return; }
   if (action === "close-modal") { $("#modal").close(); }
 });
 app.addEventListener("change", async event => {
@@ -1023,9 +1103,18 @@ $("#modal").addEventListener("click", async event => {
   if (event.target === $("#modal")) { $("#modal").close(); return; }
   const button = event.target.closest("[data-action]");
   if (button?.dataset.action === "close-modal") { $("#modal").close(); return; }
+  if (button?.dataset.action === "confirm-end-room") { $("#modal").close(); await endRoom(); return; }
+  if (button?.dataset.action === "submit-withdraw") {
+    const note = $("#withdraw-note")?.value || "";
+    button.disabled = true;
+    await withdrawQuestion(button.dataset.question, note);
+    if ($("#modal").hasAttribute("open")) button.disabled = false;
+    return;
+  }
+  if (button?.dataset.action === "submit-member-model") { await submitMemberModel(); return; }
   if (button?.dataset.action === "file-dir") { await loadWorkspaceDirectory(button.dataset.path); }
 });
-$("#modal").addEventListener("close", () => { disposeModalSdk(); fileBrowser = null; });
+$("#modal").addEventListener("close", () => { disposeModalSdk(); fileBrowser = null; memberModelPicker = null; });
 document.querySelectorAll(".mobile-tabs button").forEach(button => button.addEventListener("click", () => { state.mobilePane = button.dataset.pane; $("#room-view").dataset.mobilePane = state.mobilePane; document.querySelectorAll(".mobile-tabs button").forEach(item => item.classList.toggle("active", item === button)); persistView(); }));
 document.addEventListener("keydown", event => { if (event.key === "Escape") hideMentionMenu(); });
 

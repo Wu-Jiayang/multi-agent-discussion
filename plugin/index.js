@@ -143,7 +143,7 @@ var index_default = {
       events: { changed: { schema: { type: "object", properties: { roomId: { type: "string" } }, required: ["roomId"], additionalProperties: false } } }
     };
     await ctx.rpc.register(RoomRPC, {
-      health: async () => ({ plugin: "multi-agent-discussion", version: "0.1.1" }),
+      health: async () => ({ plugin: "multi-agent-discussion", version: "0.1.2" }),
       room: async (input) => rpc("/plugin/rpc/room", input)
     });
     async function publishCatalog() {
@@ -170,6 +170,14 @@ var index_default = {
         }
       }
     }
+    async function syncSessionGrouping(job, existing) {
+      const metadata = {
+        ...existing.metadata,
+        ...job.metadata,
+        openchamber: { ...existing.metadata?.openchamber, ...job.metadata.openchamber }
+      };
+      await ctx.session.update({ sessionID: job.sessionId, title: job.title, metadata });
+    }
     async function executeJob(job) {
       let result;
       try {
@@ -186,7 +194,7 @@ var index_default = {
           try {
             await ctx.session.synthetic({
               sessionID: created.id,
-              id: `msg_discussion_root_${job.roomId}`,
+              id: `msg_discussion_root_${job.roomId}_v2`,
               text: job.note,
               description: "\u591A\u667A\u80FD\u4F53\u8BA8\u8BBA\u5BA4\u4F1A\u8BDD\u7EC4",
               resume: false,
@@ -213,12 +221,12 @@ var index_default = {
           result = { outcome: "accepted", sessionId: created.id };
         } else if (job.type === "link-session") {
           const existing = await ctx.session.get({ sessionID: job.sessionId });
-          const metadata = {
-            ...existing.metadata,
-            ...job.metadata,
-            openchamber: { ...existing.metadata?.openchamber, ...job.metadata.openchamber }
-          };
-          await ctx.session.update({ sessionID: job.sessionId, title: job.title, metadata });
+          await syncSessionGrouping(job, existing);
+          result = { outcome: "accepted" };
+        } else if (job.type === "change-session-model") {
+          const model = { providerID: job.model.providerID, id: job.model.id };
+          if (job.model.variant) model.variant = job.model.variant;
+          await ctx.session.switchModel({ sessionID: job.sessionId, model });
           result = { outcome: "accepted" };
         } else if (job.type === "put-instructions") {
           await ctx.session.instructions.entry.put({ sessionID: job.sessionId, key: job.key, value: job.value });
@@ -247,7 +255,7 @@ var index_default = {
               try {
                 await ctx.session.synthetic({
                   sessionID: existing.id,
-                  id: `msg_discussion_root_${job.roomId}`,
+                  id: `msg_discussion_root_${job.roomId}_v2`,
                   text: job.note,
                   description: "\u591A\u667A\u80FD\u4F53\u8BA8\u8BBA\u5BA4\u4F1A\u8BDD\u7EC4",
                   resume: false,
@@ -257,6 +265,7 @@ var index_default = {
                 if (noteError?.code !== "CONFLICT") console.error("Discussion root note failed", noteError.message);
               }
             }
+            if (matchesMember && job.metadata?.openchamber) await syncSessionGrouping(job, existing);
             if (matchesRoot || matchesMember) result = { outcome: "accepted", sessionId: existing.id };
           } catch {
           }

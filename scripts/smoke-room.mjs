@@ -104,7 +104,10 @@ async function main() {
   writeFileSync(join(root, "opencode.json"), JSON.stringify({ providers: { probe: {
     name: "Room smoke", env: ["PROBE_API_KEY"], package: "@opencode/ai/providers/openai-compatible",
     settings: { baseURL: `http://127.0.0.1:${modelServer.address().port}/v1` },
-    models: { "fake-model": { name: "Fake model", capabilities: { toolcall: true } } },
+    models: {
+      "fake-model": { name: "Fake model", capabilities: { toolcall: true } },
+      "other-model": { name: "Other fake model", capabilities: { toolcall: true } },
+    },
   } } }));
   const env = {
     PATH: process.env.PATH, HOME: root, TMPDIR: root, PROBE_API_KEY: "mock",
@@ -127,6 +130,9 @@ async function main() {
     const text = await response.text();
     if (!response.ok) throw new Error(`${path}: ${response.status} ${text}`);
     return text ? JSON.parse(text) : null;
+  }
+  async function chamberControl(action, input) {
+    return chamberApi("/api/openchamber/control", { action, input, contextDirectory: root });
   }
   async function service(method, path, body) {
     const wrapped = await chamberApi("/api/guests/multi-agent-discussion/service/request", { method, path, body: body == null ? undefined : JSON.stringify(body) });
@@ -155,7 +161,7 @@ async function main() {
     assert.match(bridge.endpoint, /^http:\/\/127\.0\.0\.1:/);
     const bridgeHealth = await fetch(bridge.endpoint + "/health", { headers: { authorization: `Bearer ${bridge.token}` } });
     assert.equal(bridgeHealth.status, 200);
-    assert.equal((await bridgeHealth.json()).version, "0.1.1");
+    assert.equal((await bridgeHealth.json()).version, "0.1.2");
     console.log("Discussion plugin:", JSON.stringify((await oc("/api/plugin")).data.find(plugin => plugin.id === "multi-agent-discussion")));
     await until(async () => (await service("GET", "/models")).models.some(model => model.providerID === "probe"), "model catalog");
 
@@ -189,23 +195,48 @@ async function main() {
     for (const member of room.members) {
       const info = await oc(`/api/session/${member.sessionId}`);
       assert.equal(info.data.parentID, undefined);
-      assert.deepEqual(info.data.metadata.openchamber, { kind: "workflow-agent", parentID: room.rootSessionId });
+      assert.deepEqual(info.data.metadata.openchamber, { kind: "operator-child", parentID: room.rootSessionId });
       assert.ok(info.data.permissions.some(rule => rule.action === "*" && rule.effect === "allow"));
       assert.ok(info.data.permissions.some(rule => rule.action === "question" && rule.effect === "deny"));
       const entries = await oc(`/api/experimental/session/${member.sessionId}/instructions/entries`);
       assert.ok(entries.data.some(entry => entry.key === "discussions.room"));
     }
+    const topLevelSessions = await chamberControl("session.list", { directory: root, limit: 100 });
+    assert.ok(topLevelSessions.sessions.some(session => session.id === room.rootSessionId));
+    assert.ok(topLevelSessions.sessions.every(session => !room.members.some(member => member.sessionId === session.id)));
+    const nestedSessions = await chamberControl("session.list", { directory: root, limit: 100, children: true });
+    for (const member of room.members) {
+      const listed = nestedSessions.sessions.find(session => session.id === member.sessionId);
+      assert.equal(listed?.parentID, room.rootSessionId);
+    }
 
+    for (const member of room.members) {
+      const info = await oc(`/api/session/${member.sessionId}`);
+      await oc(`/api/session/${member.sessionId}`, { metadata: { ...info.data.metadata, openchamber: { kind: "workflow-agent", parentID: room.rootSessionId } } }, "PATCH");
+    }
     await oc(`/api/session/${room.rootSessionId}`, null, "DELETE");
     await until(async () => {
       room = await service("GET", `/rooms/${roomId}`);
-      return room.rootCreationStatus === "ready";
-    }, "deleted room root rebuilt");
+      if (room.rootCreationStatus !== "ready" || !room.members.every(member => member.sessionLinked)) return false;
+      try { await oc(`/api/session/${room.rootSessionId}`); return true; } catch { return false; }
+    }, "deleted room root rebuilt and member links restored");
     assert.equal(room.rootSessionId, rootInfo.data.id);
+    const rebuiltRootInbox = await oc(`/api/session/${room.rootSessionId}/inbox`);
+    assert.ok(rebuiltRootInbox.data.some(item => JSON.stringify(item).includes("成员会话显示在本会话下方")));
     for (const member of room.members) {
       const info = await oc(`/api/session/${member.sessionId}`);
-      assert.equal(info.data.metadata.openchamber.parentID, room.rootSessionId);
+      assert.deepEqual(info.data.metadata.openchamber, { kind: "operator-child", parentID: room.rootSessionId });
     }
+    const relinkedSessions = await chamberControl("session.list", { directory: root, limit: 100, children: true });
+    assert.ok(relinkedSessions.sessions.filter(session => session.parentID === room.rootSessionId).length >= room.members.length);
+
+    await service("POST", `/rooms/${roomId}/members/${a.memberId}/model`, { model: { providerID: "probe", id: "other-model", name: "Other fake model", providerName: "Room smoke" } });
+    await until(async () => {
+      room = await service("GET", `/rooms/${roomId}`);
+      return room.members.find(member => member.memberId === a.memberId)?.modelSynced === true;
+    }, "member model switched");
+    const switchedModel = await oc(`/api/session/${a.sessionId}`);
+    assert.equal(switchedModel.data.model.id, "other-model");
 
     writeFileSync(join(room.workspaceDir, "smoke.md"), "# 房间文件");
     const workspaceFiles = await service("POST", "/workspace/list", { roomId });
@@ -215,7 +246,7 @@ async function main() {
 
     const health = await oc("/api/rpc/multi-agent-discussion/health", { input: {} }, "POST");
     assert.equal((health.output || health.data || health).plugin, "multi-agent-discussion");
-    assert.equal((health.output || health.data || health).version, "0.1.1");
+    assert.equal((health.output || health.data || health).version, "0.1.2");
 
     const first = await service("POST", `/rooms/${roomId}/messages`, { text: "真人首帖：请审查这个方案。" });
     try {

@@ -1418,9 +1418,9 @@
         return result;
       }),
       generate: (input) => {
-        const prompt2 = input.prompt.trim();
+        const prompt = input.prompt.trim();
         const system = input.system?.trim();
-        if (prompt2.length === 0 || prompt2.length > GUEST_GENERATE_PROMPT_MAX) {
+        if (prompt.length === 0 || prompt.length > GUEST_GENERATE_PROMPT_MAX) {
           return Promise.reject(new HostRequestError("HOST_REJECTED", `Prompt must be 1 to ${GUEST_GENERATE_PROMPT_MAX} characters.`));
         }
         if (system !== void 0 && (system.length === 0 || system.length > GUEST_GENERATE_SYSTEM_MAX)) {
@@ -1430,7 +1430,7 @@
         if (maxOutputTokens !== void 0 && !Number.isFinite(maxOutputTokens)) {
           return Promise.reject(new HostRequestError("HOST_REJECTED", "maxOutputTokens must be a number."));
         }
-        const payload = { prompt: prompt2 };
+        const payload = { prompt };
         if (system !== void 0)
           payload.system = system;
         if (maxOutputTokens !== void 0)
@@ -2985,6 +2985,22 @@ ${GUEST_UI_LOOK_CSS}`;
     const label = `${info.provider} \xB7 ${info.name}${info.variant ? ` (${info.variant})` : ""}`;
     return `<span class="pill model" title="${escape(label)}">${escape(label)}</span>`;
   }
+  function memberIssuePills(member) {
+    const pills = [];
+    if (member.lastError) {
+      const count = Number(member.failureCount);
+      pills.push(`<span class="pill error" title="${escape(member.lastError)}">\u6A21\u578B\u8C03\u7528\u5931\u8D25${count > 1 ? ` \xD7${count}` : ""}</span>`);
+    }
+    if (member.wakeBackoffUntil) {
+      pills.push(`<span class="pill waiting-human" title="${escape(member.wakeBackoffUntil)}">\u9000\u907F\u81F3 ${escape(time(member.wakeBackoffUntil))}</span>`);
+    }
+    if (member.modelSynced === false) pills.push(`<span class="pill waiting-question">\u6A21\u578B\u540C\u6B65\u4E2D</span>`);
+    return pills.join("");
+  }
+  function pausedReasonText(room) {
+    if (room.pausedReason === "provider-quota") return "\u6A21\u578B\u989D\u5EA6\u6216\u4F59\u989D\u4E0D\u8DB3\uFF0C\u81EA\u52A8\u5524\u9192\u5DF2\u6682\u505C\u3002\u5145\u503C\u6216\u66F4\u6362\u6A21\u578B\u540E\u70B9\u51FB\u7EE7\u7EED\u623F\u95F4\u3002";
+    return `\u81EA\u52A8\u5524\u9192\u5DF2\u6682\u505C\uFF08${room.pausedReason === "budget" ? "\u989D\u5EA6\u7528\u5C3D" : "\u624B\u52A8\u6682\u505C"}\uFF09\u3002\u53D1\u5E16\u3001\u9605\u8BFB\u548C\u63D0\u95EE\u4ECD\u53EF\u4F7F\u7528\u3002`;
+  }
   function modelSelectOptions() {
     return state.models.map((model) => ({
       id: modelKey(model),
@@ -3123,7 +3139,7 @@ ${GUEST_UI_LOOK_CSS}`;
     const preset = state.createPreset || "generic";
     $("#create-view").innerHTML = `
     <h1>\u65B0\u5EFA\u8BA8\u8BBA\u5BA4</h1>
-    <p class="intro">\u6BCF\u4E2A\u623F\u95F4\u521B\u5EFA\u4E00\u4E2A\u6839\u4F1A\u8BDD\uFF1B\u6210\u5458\u4F1A\u8BDD\u4E0D\u663E\u793A\u5728\u4FA7\u680F\uFF0C\u53EF\u4ECE\u6210\u5458\u201C\u4F1A\u8BDD\u201D\u6309\u94AE\u6253\u5F00\u3002\u5EFA\u623F\u672C\u8EAB\u4E0D\u4F1A\u8C03\u7528\u6A21\u578B\u3002</p>
+    <p class="intro">\u6BCF\u4E2A\u623F\u95F4\u521B\u5EFA\u4E00\u4E2A\u6839\u4F1A\u8BDD\uFF1B\u6210\u5458\u4F1A\u8BDD\u663E\u793A\u5728\u6839\u4F1A\u8BDD\u4E0B\u65B9\uFF0C\u4E5F\u53EF\u4ECE\u6210\u5458\u201C\u4F1A\u8BDD\u201D\u6309\u94AE\u6253\u5F00\u3002\u5EFA\u623F\u672C\u8EAB\u4E0D\u4F1A\u8C03\u7528\u6A21\u578B\u3002</p>
     <div class="form-grid">
       <div class="field"><label>\u623F\u95F4\u540D\u79F0</label><input id="create-title" value="${escape(state.createTitle || "\u65B0\u7684\u8BA8\u8BBA\u5BA4")}" maxlength="120"></div>
       <div class="field"><label>\u9884\u8BBE</label><select id="create-preset"><option value="generic" ${preset === "generic" ? "selected" : ""}>\u666E\u901A\u8BA8\u8BBA</option><option value="debate" ${preset === "debate" ? "selected" : ""}>\u53CC\u6A21\u578B\u8FA9\u8BBA</option></select></div>
@@ -3273,14 +3289,14 @@ ${GUEST_UI_LOOK_CSS}`;
     const rootPill = rootStatus === "ready" ? "running" : rootStatus === "failed" ? "unknown" : "waiting-human";
     const rootChip = rootStatus || room.rootSessionId ? `<span class="member-chip root-session"><span>\u6839\u4F1A\u8BDD</span>${rootStatus ? `<span class="pill ${rootPill}">${escape(rootStatusLabels[rootStatus] || rootStatus)}</span>` : ""}${room.rootSessionId ? `<button data-action="open-root-session" data-session="${escape(room.rootSessionId)}">\u4F1A\u8BDD\u7EC4</button>` : ""}</span>` : "";
     $("#room-header").innerHTML = `
-    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">\u4EBA\u7C7B \xB7 \u623F\u4E3B</span></span>${room.members.map((member) => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">\u521B\u5EFA\u5931\u8D25\uFF1A${escape(member.creationError || "\u672A\u77E5\u539F\u56E0")}</span>` : member.taskError ? `<span class="pill waiting-human">\u4F1A\u8BDD\u540C\u6B65\u5931\u8D25\uFF1A${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">\u4F1A\u8BDD</button>` : ""}</span>`).join("")}</div></div>
+    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">\u4EBA\u7C7B \xB7 \u623F\u4E3B</span></span>${room.members.map((member) => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">\u521B\u5EFA\u5931\u8D25\uFF1A${escape(member.creationError || "\u672A\u77E5\u539F\u56E0")}</span>` : `${member.taskError ? `<span class="pill waiting-human">\u4F1A\u8BDD\u540C\u6B65\u5931\u8D25\uFF1A${escape(member.taskError)}</span>` : ""}${memberIssuePills(member)}<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">\u4F1A\u8BDD</button>` : ""}<button data-action="change-model" data-member="${escape(member.memberId)}">\u6362\u6A21\u578B</button></span>`).join("")}</div></div>
     <div class="room-controls">
       <button class="button ghost" data-action="open-workspace">\u6587\u4EF6</button>
       <span class="pill budget">\u4F59\u989D ${room.budget.remaining}/${room.budget.limit} \xB7 \u7B2C ${room.budget.period} \u6BB5</span>
       ${room.status === "creating" ? `<button class="button secondary" data-action="retry">\u91CD\u8BD5\u7F3A\u5931\u4F1A\u8BDD</button>` : room.status !== "ended" ? `${paused ? `<button class="button primary" data-action="resume">\u7EE7\u7EED\u623F\u95F4</button>` : `<button class="button secondary" data-action="pause">\u6682\u505C\u5524\u9192</button>`}<button class="button ghost danger" data-action="end">\u7ED3\u675F\u623F\u95F4</button>` : ""}
     </div>
     ${rootStatus === "failed" ? `<div class="root-error">\u6839\u4F1A\u8BDD\u521B\u5EFA\u5931\u8D25\uFF1A${escape(room.rootCreationError || "\u672A\u77E5\u539F\u56E0")}</div>` : ""}
-    ${paused && room.status !== "creating" ? `<div class="composer-hint">\u81EA\u52A8\u5524\u9192\u5DF2\u6682\u505C\uFF08${escape(room.pausedReason === "budget" ? "\u989D\u5EA6\u7528\u5C3D" : "\u624B\u52A8\u6682\u505C")}\uFF09\u3002\u53D1\u5E16\u3001\u9605\u8BFB\u548C\u63D0\u95EE\u4ECD\u53EF\u4F7F\u7528\u3002</div>` : ""}
+    ${paused && room.status !== "creating" ? `<div class="composer-hint${room.pausedReason === "provider-quota" ? " provider-quota" : ""}">${escape(pausedReasonText(room))}</div>` : ""}
   `;
   }
   function renderAuthorFilter() {
@@ -3513,6 +3529,7 @@ ${GUEST_UI_LOOK_CSS}`;
   }
   var modalSdkHandles = /* @__PURE__ */ new Map();
   var fileBrowser = null;
+  var memberModelPicker = null;
   function disposeModalSdk() {
     for (const handle of modalSdkHandles.values()) handle.dispose();
     modalSdkHandles.clear();
@@ -3546,12 +3563,92 @@ ${GUEST_UI_LOOK_CSS}`;
   function textPreviewable(path) {
     return /\.(md|markdown|txt|log|csv)$/i.test(path);
   }
-  function showModal(title, content) {
+  function showModal(title, content, actions = "") {
     disposeModalSdk();
     fileBrowser = null;
-    $("#modal-content").innerHTML = `<h2>${escape(title)}</h2>${content}<div class="modal-actions"><button class="button secondary" data-action="close-modal">\u5173\u95ED</button></div>`;
+    memberModelPicker = null;
+    $("#modal-content").innerHTML = `<h2>${escape(title)}</h2>${content}<div class="modal-actions">${actions}<button class="button secondary" data-action="close-modal">\u5173\u95ED</button></div>`;
     $("#modal").classList.remove("file-browser-dialog");
     $("#modal").showModal();
+  }
+  function showEndRoomConfirmation() {
+    if (!state.roomId || state.room?.status === "ended") return;
+    showModal("\u7ED3\u675F\u623F\u95F4", `<p>\u786E\u5B9A\u7ED3\u675F\u201C${escape(state.room?.title || "\u5F53\u524D\u623F\u95F4")}\u201D\uFF1F</p><p class="composer-hint">\u4F1A\u505C\u6B62\u540E\u7EED\u81EA\u52A8\u5524\u9192\u5E76\u79FB\u9664\u672C\u6269\u5C55\u6DFB\u52A0\u7684\u4F1A\u8BDD\u6307\u4EE4\uFF0C\u4F46\u4FDD\u7559\u8BA8\u8BBA\u8BB0\u5F55\u548C\u4F1A\u8BDD\u3002</p>`, `<button class="button secondary danger" data-action="confirm-end-room">\u7ED3\u675F\u623F\u95F4</button>`);
+  }
+  function showWithdrawQuestion(questionId) {
+    const question = state.questions.find((item) => item.questionId === questionId);
+    if (!question || question.status !== "pending") return;
+    showModal("\u64A4\u56DE\u95EE\u9898", `<p>\u786E\u5B9A\u64A4\u56DE\u201C${escape(question.text)}\u201D\uFF1F</p><label class="field"><span>\u64A4\u56DE\u8BF4\u660E\uFF08\u53EF\u7559\u7A7A\uFF09</span><textarea id="withdraw-note" maxlength="1000" placeholder="\u4F8B\u5982\uFF1A\u4E0E\u53E6\u4E00\u4E2A\u95EE\u9898\u91CD\u590D"></textarea></label><p class="composer-hint">\u64A4\u56DE\u540E\u4F1A\u66F4\u65B0\u95EE\u9898\u72B6\u6001\uFF0C\u4E0D\u4F1A\u5524\u9192\u5176\u4ED6\u6210\u5458\u3002</p>`, `<button class="button secondary danger" data-action="submit-withdraw" data-question="${escape(questionId)}">\u786E\u8BA4\u64A4\u56DE</button>`);
+    $("#withdraw-note").focus();
+  }
+  function showChangeModel(member) {
+    if (!member || !state.roomId) return;
+    showModal(`\u66F4\u6362\u6A21\u578B \xB7 ${member.displayName}`, `<p class="composer-hint">\u9009\u62E9\u540E\u4F1A\u7ACB\u5373\u540C\u6B65\u5230\u8BE5\u6210\u5458\u7684\u4F1A\u8BDD\u3002</p><div id="member-model-picker" class="model-picker modal-model-picker"></div>`, `<button class="button primary" data-action="submit-member-model">\u66F4\u6362\u6A21\u578B</button>`);
+    memberModelPicker = { memberId: member.memberId, displayName: member.displayName, modelKey: modelKey(member.model), submitting: false };
+    let picker;
+    picker = mountModalRoot($("#member-model-picker"), (target) => mountSelect(target, {
+      label: "\u6A21\u578B",
+      value: memberModelPicker.modelKey || null,
+      options: modelSelectOptions(),
+      onChange: (id) => {
+        if (!memberModelPicker) return;
+        memberModelPicker.modelKey = id;
+        picker.update({ value: id });
+      },
+      placeholder: "\u8BF7\u9009\u62E9\u6A21\u578B",
+      searchable: true,
+      searchPlaceholder: "\u641C\u7D22\u6A21\u578B\u6216\u63D0\u4F9B\u5546",
+      disabled: !state.models.length
+    }));
+  }
+  async function submitMemberModel() {
+    if (!memberModelPicker || memberModelPicker.submitting || !state.roomId) return;
+    const member = state.room?.members.find((item) => item.memberId === memberModelPicker.memberId);
+    const model = state.models.find((item) => modelKey(item) === memberModelPicker.modelKey);
+    if (!member) return;
+    if (!model) return showError(new Error("\u8BF7\u9009\u62E9\u6709\u6548\u6A21\u578B\u3002"));
+    const body = { providerID: model.providerID, id: model.id, name: model.name || model.id, providerName: model.providerName || model.providerID, ...model.variant ? { variant: model.variant } : {} };
+    memberModelPicker.submitting = true;
+    try {
+      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/members/${encodeURIComponent(member.memberId)}/model`, { model: body });
+      $("#modal").close();
+      await refreshRoom();
+      toast(`\u5DF2\u5C06 ${member.displayName} \u66F4\u6362\u4E3A ${body.providerName} \xB7 ${body.name}${body.variant ? ` (${body.variant})` : ""}\u3002`, "success");
+    } catch (error) {
+      if (memberModelPicker) memberModelPicker.submitting = false;
+      showError(error);
+    }
+  }
+  async function endRoom() {
+    if (!state.roomId || state.room?.status === "ended") return;
+    try {
+      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/end`);
+      await refreshRoom();
+      renderComposer();
+      toast("\u623F\u95F4\u5DF2\u7ED3\u675F\uFF0C\u8BA8\u8BBA\u8BB0\u5F55\u548C\u4F1A\u8BDD\u5DF2\u4FDD\u7559\u3002", "success");
+    } catch (error) {
+      showError(error);
+    }
+  }
+  async function withdrawQuestion(questionId, note) {
+    if (!state.roomId) return;
+    try {
+      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/questions/${encodeURIComponent(questionId)}/withdraw`, { note });
+      $("#modal").close();
+      state.questionSignature = "";
+      state.questionFirstSignature = "";
+      state.questionCursor = null;
+      await loadQuestions();
+    } catch (error) {
+      showError(error);
+      if (error.code === "ROOM_QUESTION_CONFLICT") {
+        $("#modal").close();
+        state.questionSignature = "";
+        state.questionFirstSignature = "";
+        state.questionCursor = null;
+        await Promise.all([refreshRoom(), loadQuestions()]);
+      }
+    }
   }
   function renderWorkspaceBreadcrumb() {
     if (!fileBrowser?.data) return;
@@ -3805,12 +3902,14 @@ ${GUEST_UI_LOOK_CSS}`;
       return;
     }
     if (action === "pause" || action === "resume" || action === "retry" || action === "end") {
+      if (action === "end") {
+        showEndRoomConfirmation();
+        return;
+      }
       try {
-        if (action === "end" && !confirm("\u7ED3\u675F\u623F\u95F4\uFF1F\u4F1A\u505C\u6B62\u540E\u7EED\u81EA\u52A8\u5524\u9192\u5E76\u79FB\u9664\u672C\u6269\u5C55\u6DFB\u52A0\u7684\u4F1A\u8BDD\u6307\u4EE4\uFF0C\u4F46\u4FDD\u7559\u8BA8\u8BBA\u8BB0\u5F55\u548C\u4F1A\u8BDD\u3002")) return;
         await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/${action}`, action === "resume" ? { budgetLimit: state.room?.budget.limit || 50 } : void 0);
         await refreshRoom();
         if (action === "resume") await loadTimeline(true);
-        if (action === "end") renderComposer();
       } catch (error) {
         showError(error);
       }
@@ -3819,6 +3918,11 @@ ${GUEST_UI_LOOK_CSS}`;
     if (action === "open-session" || action === "open-root-session") {
       persistView();
       await host.openSession(button2.dataset.session);
+      return;
+    }
+    if (action === "change-model") {
+      const member = state.room?.members.find((item) => item.memberId === button2.dataset.member);
+      if (member) showChangeModel(member);
       return;
     }
     if (action === "reply") {
@@ -3885,23 +3989,7 @@ ${GUEST_UI_LOOK_CSS}`;
       return;
     }
     if (action === "withdraw-question") {
-      const note = prompt("\u64A4\u56DE\u8BF4\u660E\uFF08\u53EF\u7559\u7A7A\uFF09", "");
-      if (note == null) return;
-      try {
-        await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/questions/${encodeURIComponent(button2.dataset.question)}/withdraw`, { note });
-        state.questionSignature = "";
-        state.questionFirstSignature = "";
-        state.questionCursor = null;
-        await loadQuestions();
-      } catch (error) {
-        showError(error);
-        if (error.code === "ROOM_QUESTION_CONFLICT") {
-          state.questionSignature = "";
-          state.questionFirstSignature = "";
-          state.questionCursor = null;
-          await Promise.all([refreshRoom(), loadQuestions()]);
-        }
-      }
+      showWithdrawQuestion(button2.dataset.question);
       return;
     }
     if (action === "close-modal") {
@@ -4011,6 +4099,22 @@ ${GUEST_UI_LOOK_CSS}`;
       $("#modal").close();
       return;
     }
+    if (button2?.dataset.action === "confirm-end-room") {
+      $("#modal").close();
+      await endRoom();
+      return;
+    }
+    if (button2?.dataset.action === "submit-withdraw") {
+      const note = $("#withdraw-note")?.value || "";
+      button2.disabled = true;
+      await withdrawQuestion(button2.dataset.question, note);
+      if ($("#modal").hasAttribute("open")) button2.disabled = false;
+      return;
+    }
+    if (button2?.dataset.action === "submit-member-model") {
+      await submitMemberModel();
+      return;
+    }
     if (button2?.dataset.action === "file-dir") {
       await loadWorkspaceDirectory(button2.dataset.path);
     }
@@ -4018,6 +4122,7 @@ ${GUEST_UI_LOOK_CSS}`;
   $("#modal").addEventListener("close", () => {
     disposeModalSdk();
     fileBrowser = null;
+    memberModelPicker = null;
   });
   document.querySelectorAll(".mobile-tabs button").forEach((button2) => button2.addEventListener("click", () => {
     state.mobilePane = button2.dataset.pane;

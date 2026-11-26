@@ -39,7 +39,7 @@ function setup({ budgetLimit = 50, filename = ":memory:", memberCount = 3 } = {}
     if (job.type === "create-session") {
       assert.equal(job.directory, root);
       assert.ok(job.permissions.some(rule => rule.action === "question" && rule.effect === "deny"));
-      assert.equal(job.metadata.openchamber.kind, "workflow-agent");
+      assert.equal(job.metadata.openchamber.kind, "operator-child");
       assert.equal(job.metadata.openchamber.parentID, store.room(roomId).root_session_id);
       statuses.set(job.sessionId, "idle");
     }
@@ -115,8 +115,62 @@ test("room root session is a model-free sidebar container and members link to it
   const memberJob = engine.nextJob();
   assert.equal(memberJob.type, "create-session");
   assert.equal(memberJob.parentID, undefined);
-  assert.deepEqual(memberJob.metadata.openchamber, { kind: "workflow-agent", parentID: rootJob.sessionId });
+  assert.deepEqual(memberJob.metadata.openchamber, { kind: "operator-child", parentID: rootJob.sessionId });
   assert.equal(store.room(room.roomId).root_creation_status, "ready");
+});
+
+test("schema 6 migration re-links existing member sessions as visible operator children", async () => {
+  const filename = join(scratch(), "rooms.sqlite");
+  const legacy = new RoomStore(filename);
+  const engine = new RoomEngine(legacy);
+  const room = engine.createRoom({ projectDir: scratch(), tempRoot: scratch(), members: [
+    { role: "generic", model: { providerID: "p", id: "a" } },
+    { role: "reviewer", model: { providerID: "p", id: "b" } },
+  ] });
+  legacy.db.prepare("UPDATE rooms SET root_session_id='ses_legacy_root',root_creation_status='ready' WHERE id=?").run(room.roomId);
+  for (const member of legacy.agents(room.roomId)) {
+    legacy.db.prepare("UPDATE members SET session_id=?,creation_status='ready',instructions_added=1,session_linked=1 WHERE id=?").run(`ses_legacy_${member.id}`, member.id);
+  }
+  legacy.db.prepare("UPDATE meta SET value='5' WHERE key='schema'").run();
+  legacy.close();
+
+  const upgraded = new RoomStore(filename);
+  try {
+    assert.equal(upgraded.db.prepare("SELECT value FROM meta WHERE key='schema'").get().value, "6");
+    assert.ok(upgraded.agents(room.roomId).every(member => member.session_linked === 0));
+    const upgradedEngine = new RoomEngine(upgraded);
+    const rootRefresh = upgradedEngine.nextJob();
+    assert.equal(rootRefresh.type, "create-root-session");
+    assert.equal(rootRefresh.sessionId, "ses_legacy_root");
+    await upgradedEngine.jobResult(rootRefresh, { outcome: "accepted", sessionId: rootRefresh.sessionId });
+    for (const member of upgraded.agents(room.roomId)) {
+      const link = upgradedEngine.nextJob();
+      assert.equal(link.type, "link-session");
+      assert.equal(link.sessionId, `ses_legacy_${member.id}`);
+      assert.deepEqual(link.metadata.openchamber, { kind: "operator-child", parentID: "ses_legacy_root" });
+    }
+  } finally { upgraded.close(); }
+});
+
+test("newer schema markers do not rerun one-time migrations or downgrade the database", () => {
+  const filename = join(scratch(), "rooms.sqlite");
+  const existing = new RoomStore(filename);
+  const engine = new RoomEngine(existing);
+  const room = engine.createRoom({ projectDir: scratch(), tempRoot: scratch(), members: [
+    { role: "generic", model: { providerID: "p", id: "a" } },
+    { role: "reviewer", model: { providerID: "p", id: "b" } },
+  ] });
+  existing.db.prepare("UPDATE rooms SET root_session_id='ses_newer_root',root_creation_status='ready' WHERE id=?").run(room.roomId);
+  existing.db.prepare("UPDATE members SET session_id='ses_newer_member_'||id,creation_status='ready',instructions_added=1,session_linked=1 WHERE room_id=? AND kind='agent'").run(room.roomId);
+  existing.db.prepare("UPDATE meta SET value='7' WHERE key='schema'").run();
+  existing.close();
+
+  const reopened = new RoomStore(filename);
+  try {
+    assert.equal(reopened.db.prepare("SELECT value FROM meta WHERE key='schema'").get().value, "7");
+    assert.equal(reopened.room(room.roomId).root_creation_status, "ready");
+    assert.equal(reopened.agents(room.roomId)[0].session_linked, 1);
+  } finally { reopened.close(); }
 });
 
 test("room root creation failures back off and retry the same deterministic session", async () => {
@@ -571,6 +625,108 @@ test("model variants survive room creation", async () => {
   const saved = store.roomSummary(store.room(room.roomId)).members[0].model;
   assert.equal(saved.providerName, "Probe");
   assert.equal(saved.variant, "high");
+});
+
+test("provider quota failures refund the reminder and pause automatic wakeups", async () => {
+  const { store, engine, roomId, members } = setup({ memberCount: 2 });
+  engine.post(roomId, human(store, roomId), { text: "额度测试", mentionMemberIds: [members[0].id] });
+  await engine.flush();
+  const job = await engine.dispatchNext();
+  assert.equal(job.memberId, members[0].id);
+  await engine.jobResult(job, { outcome: "accepted" });
+  assert.equal(store.room(roomId).budget_remaining, 49);
+  engine.executionEvent(members[0].session_id, "started", "quota-start");
+  engine.executionEvent(members[0].session_id, "failed", "quota-failed", { type: "QuotaExceeded", message: "Insufficient balance" });
+  const room = store.room(roomId);
+  const member = store.member(members[0].id);
+  assert.equal(room.status, "paused");
+  assert.equal(room.paused_reason, "provider-quota");
+  assert.equal(room.budget_remaining, 50);
+  assert.equal(member.failure_count, 1);
+  assert.match(member.last_error, /Insufficient balance/);
+  assert.equal(Date.parse(member.wake_backoff_until) - Date.parse("2026-11-26T10:00:00.000Z"), 30000);
+  assert.equal(store.dueReminders(roomId).length, 0);
+  engine.resume(roomId, 10);
+  assert.equal(store.room(roomId).status, "ready");
+  assert.equal(store.member(members[0].id).failure_count, 0);
+  assert.equal(store.member(members[0].id).wake_backoff_until, null);
+});
+
+test("running steer quota failure refunds only its own execution round", async () => {
+  const { store, engine, roomId, members, setStatus } = setup({ memberCount: 2 });
+  const member = members[0];
+  engine.post(roomId, human(store, roomId), { text: "上一轮普通提醒" });
+  await engine.flush();
+  const previous = await engine.dispatchNext();
+  assert.equal(previous.delivery, "queue");
+  await engine.jobResult(previous, { outcome: "accepted" });
+  assert.equal(store.room(roomId).budget_remaining, 49);
+  assert.equal(store.db.prepare("SELECT execution_round FROM reminders WHERE id=?").get(previous.jobId).execution_round, 1);
+
+  store.db.prepare("UPDATE members SET execution_round=2,last_status='running',last_terminal_round=1 WHERE id=?").run(member.id);
+  setStatus(0, "running");
+  engine.post(roomId, human(store, roomId), { text: "当前轮点名", mentionMemberIds: [member.id] });
+  const urgent = await engine.dispatchNext();
+  assert.equal(urgent.delivery, "steer");
+  await engine.jobResult(urgent, { outcome: "accepted" });
+  assert.equal(store.room(roomId).budget_remaining, 48);
+  assert.equal(store.db.prepare("SELECT execution_round FROM reminders WHERE id=?").get(urgent.jobId).execution_round, 2);
+
+  engine.executionEvent(member.session_id, "failed", "quota-steer", { type: "QuotaExceeded", message: "Insufficient balance" });
+  const previousReminder = store.db.prepare("SELECT * FROM reminders WHERE id=?").get(previous.jobId);
+  const urgentReminder = store.db.prepare("SELECT * FROM reminders WHERE id=?").get(urgent.jobId);
+  assert.equal(previousReminder.charged, 1);
+  assert.equal(previousReminder.refunded, 0);
+  assert.equal(urgentReminder.charged, 0);
+  assert.equal(urgentReminder.refunded, 1);
+  assert.equal(store.room(roomId).budget_remaining, 49);
+  assert.equal(store.room(roomId).paused_reason, "provider-quota");
+});
+
+test("ordinary execution failures use increasing wake backoff", async () => {
+  const root = scratch();
+  const store = new RoomStore();
+  let clock = Date.parse("2026-11-26T10:00:00.000Z");
+  const engine = new RoomEngine(store, { now: () => new Date(clock).toISOString(), statusProvider: async () => ({ status: "idle" }) });
+  const room = engine.createRoom({ projectDir: root, tempRoot: root, members: [
+    { role: "generic", model: { providerID: "p", id: "a" } },
+    { role: "generic", model: { providerID: "p", id: "b" } },
+  ] });
+  for (let guard = 0; guard < 10; guard += 1) {
+    const job = engine.nextJob();
+    if (!job) break;
+    await engine.jobResult(job, { outcome: "accepted", sessionId: job.sessionId });
+  }
+  const member = store.agents(room.roomId)[0];
+  for (const [index, delay] of [30000, 60000, 120000].entries()) {
+    engine.post(room.roomId, human(store, room.roomId), { text: `失败 ${index}`, mentionMemberIds: [member.id] });
+    await engine.flush();
+    const job = await engine.dispatchNext();
+    assert.equal(job.memberId, member.id);
+    await engine.jobResult(job, { outcome: "accepted" });
+    engine.executionEvent(member.session_id, "started", `start-${index}`);
+    engine.executionEvent(member.session_id, "failed", `failed-${index}`, { type: "ProviderError", message: "temporary provider failure" });
+    const current = store.member(member.id);
+    assert.equal(current.failure_count, index + 1);
+    assert.equal(Date.parse(current.wake_backoff_until) - clock, delay);
+    assert.equal(store.dueReminders(room.roomId).some(row => row.member_id === member.id), false);
+    clock += delay;
+    await engine.recheckMember(room.roomId, member.id);
+  }
+});
+
+test("changing a member model queues an idempotent session model switch", async () => {
+  const { store, engine, roomId, members } = setup({ memberCount: 2 });
+  const changed = engine.changeModel(roomId, members[0].id, { providerID: "p", id: "replacement", name: "Replacement", providerName: "Probe", variant: "high" });
+  assert.equal(changed.model.id, "replacement");
+  assert.equal(changed.model.providerName, "Probe");
+  assert.equal(changed.modelSynced, false);
+  const job = engine.nextJob();
+  assert.equal(job.type, "change-session-model");
+  assert.equal(job.sessionId, members[0].session_id);
+  assert.deepEqual(job.model, { providerID: "p", id: "replacement", name: "Replacement", providerName: "Probe", variant: "high" });
+  await engine.jobResult(job, { outcome: "accepted" });
+  assert.equal(store.member(members[0].id).model_synced, 1);
 });
 
 test("instruction refresh failures on ready members are visible and back off", async () => {
