@@ -29,6 +29,8 @@ export class RoomEngine {
     this.store = store;
     this.now = options.now || (() => new Date().toISOString());
     this.statusProvider = options.statusProvider || (async () => ({ status: "unknown" }));
+    this.rootSessionProvider = options.rootSessionProvider || null;
+    this.rootChecks = new Map();
     this.onChange = options.onChange || (() => {});
     this.waitKinds = options.waitKinds || new Map();
     this.pendingChecks = new Set();
@@ -185,7 +187,28 @@ export class RoomEngine {
     return Object.fromEntries(members.map((member, index) => [member.id, statuses[index]]));
   }
 
+  async ensureRootSession(roomId) {
+    if (!this.rootSessionProvider) return;
+    const room = this.store.room(roomId);
+    if (room.status === "ended" || room.root_creation_status !== "ready" || !room.root_session_id) return;
+    const previous = this.rootChecks.get(roomId);
+    const interval = previous?.healthy ? 30000 : 5000;
+    if (previous && Date.now() - previous.at < interval) return;
+    try {
+      await this.rootSessionProvider(room.root_session_id);
+      this.rootChecks.set(roomId, { at: Date.now(), healthy: true });
+    } catch (error) {
+      if (error?.status !== 404) {
+        this.rootChecks.set(roomId, { at: Date.now(), healthy: false });
+        return;
+      }
+      if (this.store.resetMissingRoot(roomId)) this.changed(roomId);
+      this.rootChecks.delete(roomId);
+    }
+  }
+
   async roomState(roomId) {
+    await this.ensureRootSession(roomId);
     const summary = this.store.roomSummary(this.store.room(roomId));
     const statuses = await this.memberStatuses(roomId);
     summary.members = summary.members.map(member => member.kind === "agent" ? { ...member, sessionStatus: statuses[member.memberId] || "unknown" } : member);
@@ -320,6 +343,7 @@ export class RoomEngine {
   nextJob() {
     const now = this.now();
     const due = member => !member.next_attempt_at || Date.parse(member.next_attempt_at) <= Date.parse(now);
+    const rootDue = room => !room.root_next_attempt_at || Date.parse(room.root_next_attempt_at) <= Date.parse(now);
     for (const room of this.store.listRooms()) {
       if (room.status === "ended") {
         for (const member of this.store.agents(room.roomId)) {
@@ -330,25 +354,48 @@ export class RoomEngine {
         }
       }
     }
-    for (const room of this.store.listRooms()) {
-      if (room.status === "ended") continue;
-      for (const member of this.store.agents(room.roomId)) {
+    for (const listed of this.store.listRooms()) {
+      if (listed.status === "ended") continue;
+      const room = this.store.prepareRoomRoot(listed.roomId);
+      const roomId = room.id;
+      const rootReady = room.root_creation_status === "ready";
+      if (!rootReady && rootDue(room)) {
+        this.store.rootTaskAttempt(roomId, now);
+        return {
+          jobId: `root:${roomId}`, type: "create-root-session", roomId,
+          sessionId: room.root_session_id, title: `${room.title} · 讨论室`, directory: room.project_dir,
+          metadata: { discussionRoomId: roomId, discussionRoot: true },
+          note: `这是“${room.title}”的讨论室会话组。成员会话不会显示在侧栏，请从“多智能体讨论室”页面中的成员“会话”按钮打开。房间自动调度不会向本会话调用模型；请勿直接向本会话发送议题。`,
+        };
+      }
+      for (const member of this.store.agents(roomId)) {
         if (!due(member)) continue;
+        const metadata = {
+          discussionRoomId: roomId,
+          discussionMemberId: member.id,
+          ...(rootReady ? { openchamber: { kind: "workflow-agent", parentID: room.root_session_id } } : {}),
+        };
+        const title = `${room.title} · ${member.display_name}`;
+        if (member.session_id && !member.session_linked && rootReady) {
+          this.store.taskAttempt(roomId, member.id, now);
+          return { jobId: `link:${roomId}:${member.id}`, type: "link-session", roomId, memberId: member.id, sessionId: member.session_id, title, metadata };
+        }
+        if (room.status === "ended") continue;
         if (!member.session_id && member.creation_status === "pending") {
-          this.store.taskAttempt(room.roomId, member.id, now);
+          this.store.taskAttempt(roomId, member.id, now);
           return {
-            jobId: `create:${room.roomId}:${member.id}`, type: "create-session", roomId: room.roomId, memberId: member.id,
-            sessionId: `ses_disc_${room.roomId}_${member.id}`, title: `${room.title} · ${member.display_name}`,
-            directory: room.projectDir, model: JSON.parse(member.model_json), permissions: [
+            jobId: `create:${roomId}:${member.id}`, type: "create-session", roomId, memberId: member.id,
+            sessionId: `ses_disc_${roomId}_${member.id}`, title,
+            directory: room.project_dir, model: JSON.parse(member.model_json), permissions: [
               { action: "*", resource: "*", effect: "allow" },
               { action: "question", resource: "*", effect: "deny" },
             ],
-            metadata: { discussionRoomId: room.roomId, discussionMemberId: member.id },
+            metadata,
           };
         }
         if (member.session_id && !member.instructions_added) {
-          this.store.taskAttempt(room.roomId, member.id, now);
-          return { jobId: `instructions:${room.roomId}:${member.id}`, type: "put-instructions", roomId: room.roomId, memberId: member.id, sessionId: member.session_id, ...this.store.instructions(room.roomId, member.id) };
+          this.store.taskAttempt(roomId, member.id, now);
+          return { jobId: `instructions:${roomId}:${member.id}`, type: "put-instructions", roomId, memberId: member.id, sessionId: member.session_id, ...this.store.instructions(roomId, member.id) };
         }
       }
     }
@@ -413,9 +460,15 @@ export class RoomEngine {
 
   async jobResult(job, result) {
     const outcome = result.outcome;
-    if (job.type === "create-session") {
-      if (outcome === "accepted") this.store.sessionCreated(job.roomId, job.memberId, result.sessionId, this.now());
+    if (job.type === "create-root-session") {
+      if (outcome === "accepted") this.store.rootSessionCreated(job.roomId, result.sessionId, this.now());
+      else this.store.rootSessionFailed(job.roomId, result.error || "Room root session creation failed", this.now());
+    } else if (job.type === "create-session") {
+      if (outcome === "accepted") this.store.sessionCreated(job.roomId, job.memberId, result.sessionId, this.now(), job.metadata?.openchamber?.parentID != null);
       else this.store.sessionFailed(job.roomId, job.memberId, result.error || "Session creation failed");
+    } else if (job.type === "link-session") {
+      if (outcome === "accepted") this.store.sessionLinked(job.roomId, job.memberId);
+      else this.store.taskFailed(job.roomId, job.memberId, result.error || "Session grouping failed", this.now());
     } else if (job.type === "put-instructions") {
       if (outcome === "accepted") this.store.instructionsAdded(job.roomId, job.memberId);
       else if (!this.store.member(job.memberId).instructions_added) this.store.taskFailed(job.roomId, job.memberId, result.error || "Instruction update failed", this.now());

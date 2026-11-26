@@ -176,15 +176,41 @@ async function main() {
     }
     assert.equal(modelRequests.length, 0, "creation must not call a model");
     assert.equal(new Set(room.members.map(member => member.sessionId)).size, 2);
+    assert.equal(room.rootCreationStatus, "ready");
+    assert.ok(room.rootSessionId);
+    const rootInfo = await oc(`/api/session/${room.rootSessionId}`);
+    assert.equal(rootInfo.data.metadata.discussionRoot, true);
+    assert.equal(rootInfo.data.parentID, undefined);
+    const rootInbox = await oc(`/api/session/${room.rootSessionId}/inbox`);
+    assert.ok(rootInbox.data.some(item => JSON.stringify(item).includes("不会向本会话调用模型")), JSON.stringify(rootInbox));
     const [a, b] = room.members;
     memberB = b.memberId;
     for (const member of room.members) {
       const info = await oc(`/api/session/${member.sessionId}`);
+      assert.equal(info.data.parentID, undefined);
+      assert.deepEqual(info.data.metadata.openchamber, { kind: "workflow-agent", parentID: room.rootSessionId });
       assert.ok(info.data.permissions.some(rule => rule.action === "*" && rule.effect === "allow"));
       assert.ok(info.data.permissions.some(rule => rule.action === "question" && rule.effect === "deny"));
       const entries = await oc(`/api/experimental/session/${member.sessionId}/instructions/entries`);
       assert.ok(entries.data.some(entry => entry.key === "discussions.room"));
     }
+
+    await oc(`/api/session/${room.rootSessionId}`, null, "DELETE");
+    await until(async () => {
+      room = await service("GET", `/rooms/${roomId}`);
+      return room.rootCreationStatus === "ready";
+    }, "deleted room root rebuilt");
+    assert.equal(room.rootSessionId, rootInfo.data.id);
+    for (const member of room.members) {
+      const info = await oc(`/api/session/${member.sessionId}`);
+      assert.equal(info.data.metadata.openchamber.parentID, room.rootSessionId);
+    }
+
+    writeFileSync(join(room.workspaceDir, "smoke.md"), "# 房间文件");
+    const workspaceFiles = await service("POST", "/workspace/list", { roomId });
+    assert.ok(workspaceFiles.entries.some(entry => entry.name === "smoke.md" && entry.kind === "file"));
+    const workspacePreview = await service("POST", "/workspace/read", { roomId, path: join(room.workspaceDir, "smoke.md") });
+    assert.match(workspacePreview.content, /房间文件/);
 
     const health = await oc("/api/rpc/multi-agent-discussion/health", { input: {} }, "POST");
     assert.equal((health.output || health.data || health).plugin, "multi-agent-discussion");

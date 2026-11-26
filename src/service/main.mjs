@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { basename, isAbsolute, join, resolve, sep } from "node:path";
+import { mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir, userInfo } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createServiceHost, readSessionEventRequest } from "@openchamber/sdk";
@@ -95,7 +95,11 @@ export function createDiscussionService(options = {}) {
       headers: { authorization: `Bearer ${serviceToken}` },
       signal: AbortSignal.timeout(5000),
     });
-    if (!response.ok) throw new Error(`OpenCode read returned ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(`OpenCode read returned ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
     return response.json();
   }
 
@@ -125,6 +129,7 @@ export function createDiscussionService(options = {}) {
 
   engine = options.engine || new RoomEngine(store, {
     statusProvider, waitKinds,
+    rootSessionProvider: sessionID => opencode(`/api/session/${encodeURIComponent(sessionID)}`),
     onChange: event => {
       statusCache.clear();
       if (serviceHost) void serviceHost.emit("room:changed", event).catch(() => {});
@@ -138,13 +143,42 @@ export function createDiscussionService(options = {}) {
     return match ? { roomId: decodeURIComponent(match[1]), rest: match[2] || "" } : null;
   }
 
-  function readWorkspace(roomId, requested) {
+  function resolveWorkspacePath(roomId, requested) {
     const room = store.room(roomId);
     if (typeof requested !== "string" || !isAbsolute(requested) || requested.includes("\0")) throw new RoomError("ROOM_BAD_PATH", "Use an absolute path inside this room's temporary directory.", {}, 400);
     const base = realpathSync(room.workspace_dir);
     let target;
-    try { target = realpathSync(requested); } catch { throw new RoomError("ROOM_FILE_NOT_FOUND", "The discussion file does not exist.", {}, 404); }
+    try { target = realpathSync(requested); } catch { throw new RoomError("ROOM_FILE_NOT_FOUND", "The discussion path does not exist.", {}, 404); }
     if (target !== base && !target.startsWith(base + sep)) throw new RoomError("ROOM_BAD_PATH", "The path leaves this room's temporary directory.", {}, 403);
+    return { base, target };
+  }
+
+  function listWorkspace(roomId, requested) {
+    const { base, target } = resolveWorkspacePath(roomId, requested);
+    const info = statSync(target);
+    if (!info.isDirectory()) throw new RoomError("ROOM_BAD_PATH", "Only discussion directories can be listed.", {}, 400);
+    const entries = [];
+    for (const entry of readdirSync(target, { withFileTypes: true })) {
+      let path;
+      try { path = realpathSync(join(target, entry.name)); } catch { continue; }
+      if (path !== base && !path.startsWith(base + sep)) continue;
+      const stat = statSync(path);
+      if (!stat.isDirectory() && !stat.isFile()) continue;
+      entries.push({
+        name: entry.name, path, relativePath: relative(base, path),
+        kind: stat.isDirectory() ? "directory" : "file",
+        size: stat.isFile() ? stat.size : null, mtime: stat.mtime.toISOString(),
+      });
+    }
+    entries.sort((a, b) => a.kind !== b.kind ? (a.kind === "directory" ? -1 : 1) : a.name.localeCompare(b.name, "zh-CN"));
+    return {
+      rootPath: base, path: target, relativePath: relative(base, target),
+      parentPath: target === base ? null : resolve(target, ".."), entries,
+    };
+  }
+
+  function readWorkspace(roomId, requested) {
+    const { target } = resolveWorkspacePath(roomId, requested);
     const info = statSync(target);
     if (!info.isFile()) throw new RoomError("ROOM_BAD_PATH", "Only regular files can be previewed.", {}, 400);
     if (info.size > 2 * 1024 * 1024) throw new RoomError("ROOM_FILE_TOO_LARGE", "The preview limit is 2 MB.", {}, 413);
@@ -206,13 +240,21 @@ export function createDiscussionService(options = {}) {
     if (req.method === "GET" && url.pathname === "/meta") return json(res, 200, { humanName: defaultHumanName() });
     if (req.method === "GET" && url.pathname === "/models") {
       const directory = query(url).directory;
-      return json(res, 200, { models: directory ? modelCatalogs.get(directory) || [] : models, unicode: UNICODE_IMPLEMENTATION, maxAgentWidth: MAX_AGENT_MESSAGE_WIDTH });
+      const scoped = directory ? modelCatalogs.get(directory) : undefined;
+      const catalog = scoped ?? models;
+      const source = catalog.length ? (scoped ? "project" : "global") : "empty";
+      return json(res, 200, { models: catalog, source, unicode: UNICODE_IMPLEMENTATION, maxAgentWidth: MAX_AGENT_MESSAGE_WIDTH });
     }
     if (req.method === "GET" && url.pathname === "/rooms") return json(res, 200, { rooms: engine.listRooms(query(url).projectDir || null) });
     if (req.method === "POST" && url.pathname === "/rooms") {
       const input = await body(req);
       const name = input.humanName || defaultHumanName();
       return json(res, 200, engine.createRoom({ ...input, humanName: name, tempRoot }));
+    }
+    if (req.method === "POST" && url.pathname === "/workspace/list") {
+      const input = await body(req);
+      const room = store.room(input.roomId);
+      return json(res, 200, listWorkspace(input.roomId, input.path || room.workspace_dir));
     }
     if (req.method === "POST" && url.pathname === "/workspace/read") {
       const input = await body(req);

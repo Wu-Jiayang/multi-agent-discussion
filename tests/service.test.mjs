@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { once } from "node:events";
 import { createDiscussionService } from "../src/service/main.mjs";
@@ -34,7 +34,9 @@ async function fixture() {
       const job = response.data;
       if (!job?.type) break;
       jobs.push(job);
-      const result = job.type === "create-session" ? { outcome: "accepted", sessionId: job.sessionId } : { outcome: "accepted" };
+      const result = job.type === "create-root-session" || job.type === "create-session"
+        ? { outcome: "accepted", sessionId: job.sessionId }
+        : { outcome: "accepted" };
       await call("POST", "/plugin/result", { job, result }, true);
     }
     return jobs;
@@ -55,7 +57,7 @@ test("model catalog survives service restart", async () => {
   service.server.listen(0, "127.0.0.1");
   await once(service.server, "listening");
   let base = `http://127.0.0.1:${service.server.address().port}`;
-  await fetch(base + "/plugin/catalog", { method: "POST", headers: { authorization: "Bearer plugin", "content-type": "application/json" }, body: JSON.stringify({ directory: root, models: [{ providerID: "probe", id: "persisted", name: "Persisted" }] }) });
+  await fetch(base + "/plugin/catalog", { method: "POST", headers: { authorization: "Bearer plugin", "content-type": "application/json" }, body: JSON.stringify({ directory: root, models: [{ providerID: "probe", id: "persisted", name: "Persisted", providerName: "Probe", variant: "high" }] }) });
   service.store.close();
   await new Promise(resolveClose => service.server.close(resolveClose));
   service = createDiscussionService(options);
@@ -65,6 +67,9 @@ test("model catalog survives service restart", async () => {
   const response = await fetch(base + `/models?directory=${encodeURIComponent(root)}`, { headers: { authorization: "Bearer host" } });
   const data = await response.json();
   assert.equal(data.models[0].id, "persisted");
+  assert.equal(data.models[0].providerName, "Probe");
+  assert.equal(data.models[0].variant, "high");
+  assert.equal(data.source, "project");
   service.store.close();
   await new Promise(resolveClose => service.server.close(resolveClose));
   rmSync(root, { recursive: true, force: true });
@@ -82,17 +87,24 @@ test("HTTP service authenticates host/plugin separately and creates rooms withou
     assert.equal((await f.call("GET", "/models")).data.models.length, 1);
     await f.call("POST", "/plugin/catalog", { models: [{ providerID: "other", id: "x" }], directory: "/other" }, true);
     assert.equal((await f.call("GET", "/models")).data.models[0].providerID, "other");
-    assert.deepEqual((await f.call("GET", "/models?directory=%2Fmissing")).data.models, []);
+    const fallback = (await f.call("GET", "/models?directory=%2Fmissing")).data;
+    assert.equal(fallback.source, "global");
+    assert.equal(fallback.models[0].providerID, "other");
     const created = (await f.call("POST", "/rooms", { projectDir: f.root, title: "HTTP 房间", members: [
       { role: "generic", model: { providerID: "probe", id: "fake" } },
       { role: "reviewer", model: { providerID: "probe", id: "fake" } },
     ] })).data;
     const jobs = await f.drainJobs();
+    assert.equal(jobs.filter(job => job.type === "create-root-session").length, 1);
     assert.equal(jobs.filter(job => job.type === "create-session").length, 2);
     assert.equal(jobs.filter(job => job.type === "put-instructions").length, 2);
     assert.equal(jobs.some(job => job.type === "submit-reminder"), false);
+    const memberJobs = jobs.filter(job => job.type === "create-session");
+    assert.ok(memberJobs.every(job => job.metadata.openchamber.kind === "workflow-agent"));
+    assert.ok(memberJobs.every(job => job.metadata.openchamber.parentID === created.rootSessionId));
     const room = (await f.call("GET", `/rooms/${created.roomId}`)).data;
     assert.equal(room.status, "ready");
+    assert.equal(room.rootCreationStatus, "ready");
     assert.equal(room.members.length, 2);
     assert.ok(room.members.every(member => member.sessionStatus === "idle"));
   } finally { await f.close(); }
@@ -137,9 +149,34 @@ test("plugin tools, presentation receipts, questions and safe workspace previews
 
     const workspace = (await f.call("GET", `/rooms/${created.roomId}`)).data.workspaceDir;
     writeFileSync(join(workspace, "note.md"), "# 讨论文档\n内容");
+    mkdirSync(join(workspace, "review"));
+    writeFileSync(join(workspace, "review", "findings.txt"), "findings");
+    symlinkSync("/etc/passwd", join(workspace, "escape.md"));
+    const listed = await f.call("POST", "/workspace/list", { roomId: created.roomId });
+    assert.deepEqual(listed.data.entries.map(entry => entry.name), ["review", "note.md"]);
+    assert.equal(listed.data.parentPath, null);
+    assert.equal(listed.data.rootPath, realpathSync(workspace));
+    assert.equal(listed.data.relativePath, "");
+    assert.equal(listed.data.entries.find(entry => entry.name === "review").kind, "directory");
+    assert.equal(listed.data.entries.find(entry => entry.name === "note.md").kind, "file");
+    const nested = await f.call("POST", "/workspace/list", { roomId: created.roomId, path: join(workspace, "review") });
+    assert.equal(nested.data.entries[0].relativePath, "review/findings.txt");
+    assert.equal(nested.data.parentPath, workspace);
+    assert.equal(nested.data.relativePath, "review");
+    const workspaceAlias = join(f.root, "workspace-alias");
+    const reviewAlias = join(f.root, "review-alias");
+    symlinkSync(workspace, workspaceAlias);
+    symlinkSync(join(workspace, "review"), reviewAlias);
+    const aliasedRoot = await f.call("POST", "/workspace/list", { roomId: created.roomId, path: workspaceAlias });
+    assert.equal(aliasedRoot.data.path, realpathSync(workspace));
+    assert.equal(aliasedRoot.data.relativePath, "");
+    const aliasedReview = await f.call("POST", "/workspace/list", { roomId: created.roomId, path: reviewAlias });
+    assert.equal(aliasedReview.data.relativePath, "review");
+    const escapedList = await f.call("POST", "/workspace/list", { roomId: created.roomId, path: "/etc" });
+    assert.equal(escapedList.status, 403);
+    assert.equal(escapedList.data.error.code, "ROOM_BAD_PATH");
     const preview = await f.call("POST", "/workspace/read", { roomId: created.roomId, path: join(workspace, "note.md") });
     assert.match(preview.data.content, /讨论文档/);
-    symlinkSync("/etc/passwd", join(workspace, "escape.md"));
     const escaped = await f.call("POST", "/workspace/read", { roomId: created.roomId, path: join(workspace, "escape.md") });
     assert.equal(escaped.status, 403, JSON.stringify(escaped.data));
     assert.equal(escaped.data.error.code, "ROOM_BAD_PATH");

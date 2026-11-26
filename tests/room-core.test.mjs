@@ -39,9 +39,14 @@ function setup({ budgetLimit = 50, filename = ":memory:", memberCount = 3 } = {}
     if (job.type === "create-session") {
       assert.equal(job.directory, root);
       assert.ok(job.permissions.some(rule => rule.action === "question" && rule.effect === "deny"));
+      assert.equal(job.metadata.openchamber.kind, "workflow-agent");
+      assert.equal(job.metadata.openchamber.parentID, store.room(roomId).root_session_id);
       statuses.set(job.sessionId, "idle");
-      void engine.jobResult(job, { outcome: "accepted", sessionId: job.sessionId });
-    } else void engine.jobResult(job, { outcome: "accepted" });
+    }
+    const result = job.type === "create-root-session" || job.type === "create-session"
+      ? { outcome: "accepted", sessionId: job.sessionId }
+      : { outcome: "accepted" };
+    void engine.jobResult(job, result);
   }
   assert.equal(store.room(roomId).status, "ready");
   return {
@@ -92,6 +97,154 @@ test("creation makes independent empty sessions, unique names and per-session in
   assert.equal(engine.nextJob(), null);
 });
 
+test("room root session is a model-free sidebar container and members link to it", async () => {
+  const root = scratch();
+  const store = new RoomStore();
+  const engine = new RoomEngine(store);
+  const room = engine.createRoom({ projectDir: root, tempRoot: root, members: [
+    { role: "generic", model: { providerID: "p", id: "a" } },
+    { role: "reviewer", model: { providerID: "p", id: "b" } },
+  ] });
+  const rootJob = engine.nextJob();
+  assert.equal(rootJob.type, "create-root-session");
+  assert.equal(rootJob.model, undefined);
+  assert.equal(rootJob.permissions, undefined);
+  assert.equal(rootJob.metadata.discussionRoot, true);
+  assert.match(rootJob.note, /不会向本会话调用模型/);
+  await engine.jobResult(rootJob, { outcome: "accepted", sessionId: rootJob.sessionId });
+  const memberJob = engine.nextJob();
+  assert.equal(memberJob.type, "create-session");
+  assert.equal(memberJob.parentID, undefined);
+  assert.deepEqual(memberJob.metadata.openchamber, { kind: "workflow-agent", parentID: rootJob.sessionId });
+  assert.equal(store.room(room.roomId).root_creation_status, "ready");
+});
+
+test("room root creation failures back off and retry the same deterministic session", async () => {
+  const root = scratch();
+  const store = new RoomStore();
+  let clock = Date.parse("2026-11-26T10:00:00.000Z");
+  const engine = new RoomEngine(store, { now: () => new Date(clock).toISOString() });
+  const room = engine.createRoom({ projectDir: root, tempRoot: root, members: [
+    { role: "generic", model: { providerID: "p", id: "a" } },
+    { role: "reviewer", model: { providerID: "p", id: "b" } },
+  ] });
+  const first = engine.nextJob();
+  await engine.jobResult(first, { outcome: "failed", error: "temporary root failure" });
+  assert.equal(store.room(room.roomId).root_creation_status, "failed");
+  assert.match(store.room(room.roomId).root_creation_error, /temporary root failure/);
+  const member = engine.nextJob();
+  assert.equal(member.type, "create-session");
+  assert.equal(member.metadata.openchamber, undefined);
+  await engine.jobResult(member, { outcome: "accepted", sessionId: member.sessionId });
+  assert.equal(store.member(member.memberId).session_linked, 0);
+  const instructions = engine.nextJob();
+  assert.equal(instructions.type, "put-instructions");
+  await engine.jobResult(instructions, { outcome: "accepted" });
+  clock += 5000;
+  const retry = engine.nextJob();
+  assert.equal(retry.jobId, first.jobId);
+  assert.equal(retry.sessionId, first.sessionId);
+});
+
+test("ended rooms do not gain a new sidebar root", async () => {
+  const root = scratch();
+  const store = new RoomStore();
+  const engine = new RoomEngine(store);
+  const room = engine.createRoom({ projectDir: root, tempRoot: root, members: [
+    { role: "generic", model: { providerID: "p", id: "a" } },
+    { role: "reviewer", model: { providerID: "p", id: "b" } },
+  ] });
+  engine.end(room.roomId);
+  assert.equal(engine.nextJob(), null);
+  assert.equal(store.room(room.roomId).root_creation_status, "pending");
+});
+
+test("root existence check failures are cached instead of blocking every room refresh", async () => {
+  const root = scratch();
+  const store = new RoomStore();
+  let checks = 0;
+  const engine = new RoomEngine(store, {
+    rootSessionProvider: async () => {
+      checks += 1;
+      throw Object.assign(new Error("unavailable"), { status: 503 });
+    },
+  });
+  const room = engine.createRoom({ projectDir: root, tempRoot: root, members: [
+    { role: "generic", model: { providerID: "p", id: "a" } },
+    { role: "reviewer", model: { providerID: "p", id: "b" } },
+  ] });
+  for (let guard = 0; guard < 10; guard += 1) {
+    const job = engine.nextJob();
+    if (!job) break;
+    await engine.jobResult(job, { outcome: "accepted", sessionId: job.sessionId });
+  }
+  await engine.roomState(room.roomId);
+  await engine.roomState(room.roomId);
+  assert.equal(checks, 1);
+});
+
+test("a deleted room root is rebuilt and member links are restored", async () => {
+  const root = scratch();
+  const store = new RoomStore();
+  let missing = false;
+  const engine = new RoomEngine(store, {
+    rootSessionProvider: async () => {
+      if (missing) throw Object.assign(new Error("missing"), { status: 404 });
+      return { id: "root" };
+    },
+  });
+  const room = engine.createRoom({ projectDir: root, tempRoot: root, members: [
+    { role: "generic", model: { providerID: "p", id: "a" } },
+    { role: "reviewer", model: { providerID: "p", id: "b" } },
+  ] });
+  for (let guard = 0; guard < 10; guard += 1) {
+    const job = engine.nextJob();
+    if (!job) break;
+    await engine.jobResult(job, { outcome: "accepted", sessionId: job.sessionId });
+  }
+  const rootSessionId = store.room(room.roomId).root_session_id;
+  missing = true;
+  await engine.roomState(room.roomId);
+  assert.equal(store.room(room.roomId).root_creation_status, "pending");
+  assert.ok(store.agents(room.roomId).every(member => member.session_linked === 0));
+  const rootJob = engine.nextJob();
+  assert.equal(rootJob.type, "create-root-session");
+  assert.equal(rootJob.sessionId, rootSessionId);
+  await engine.jobResult(rootJob, { outcome: "accepted", sessionId: rootJob.sessionId });
+  for (const member of store.agents(room.roomId)) {
+    const link = engine.nextJob();
+    assert.equal(link.type, "link-session");
+    assert.equal(link.sessionId, member.session_id);
+    await engine.jobResult(link, { outcome: "accepted" });
+  }
+});
+
+test("existing rooms gain a root and logical member links without model calls", async () => {
+  const root = scratch();
+  const store = new RoomStore();
+  const engine = new RoomEngine(store);
+  const room = engine.createRoom({ projectDir: root, tempRoot: root, members: [
+    { role: "generic", model: { providerID: "p", id: "a" } },
+    { role: "reviewer", model: { providerID: "p", id: "b" } },
+  ] });
+  store.db.prepare("UPDATE rooms SET status='ready',root_session_id=NULL,root_creation_status='pending' WHERE id=?").run(room.roomId);
+  for (const [index, member] of store.agents(room.roomId).entries()) {
+    store.db.prepare("UPDATE members SET session_id=?,creation_status='ready',instructions_added=1,session_linked=0 WHERE id=?").run(`ses_old_${index}`, member.id);
+  }
+  const rootJob = engine.nextJob();
+  assert.equal(rootJob.type, "create-root-session");
+  await engine.jobResult(rootJob, { outcome: "accepted", sessionId: rootJob.sessionId });
+  for (const member of store.agents(room.roomId)) {
+    const link = engine.nextJob();
+    assert.equal(link.type, "link-session");
+    assert.equal(link.sessionId, member.session_id);
+    assert.equal(link.metadata.openchamber.parentID, rootJob.sessionId);
+    await engine.jobResult(link, { outcome: "accepted" });
+  }
+  assert.equal(engine.nextJob(), null);
+  assert.ok(store.agents(room.roomId).every(member => member.session_linked === 1));
+});
+
 test("debate stances follow creation order and renaming refreshes every roster", async () => {
   const root = scratch();
   const store = new RoomStore();
@@ -127,7 +280,11 @@ test("partial creation retry only fills the missing session", async () => {
     { role: "generic", model: { providerID: "p", id: "a" } },
     { role: "generic", model: { providerID: "p", id: "b" } },
   ] });
+  const rootJob = engine.nextJob();
+  assert.equal(rootJob.type, "create-root-session");
+  await engine.jobResult(rootJob, { outcome: "accepted", sessionId: rootJob.sessionId });
   const first = engine.nextJob();
+  assert.equal(first.type, "create-session");
   await engine.jobResult(first, { outcome: "accepted", sessionId: first.sessionId });
   const firstInstructions = engine.nextJob();
   assert.equal(firstInstructions.type, "put-instructions");
@@ -402,17 +559,30 @@ test("model variants survive room creation", async () => {
   const root = scratch();
   const store = new RoomStore();
   const engine = new RoomEngine(store);
-  engine.createRoom({ projectDir: root, tempRoot: root, members: [
-    { role: "generic", model: { providerID: "p", id: "a", variant: "high" } },
+  const room = engine.createRoom({ projectDir: root, tempRoot: root, members: [
+    { role: "generic", model: { providerID: "p", id: "a", name: "Model A", providerName: "Probe", variant: "high" } },
     { role: "generic", model: { providerID: "p", id: "b" } },
   ] });
-  assert.equal(engine.nextJob().model.variant, "high");
+  const rootJob = engine.nextJob();
+  assert.equal(rootJob.type, "create-root-session");
+  await engine.jobResult(rootJob, { outcome: "accepted", sessionId: rootJob.sessionId });
+  const memberJob = engine.nextJob();
+  assert.equal(memberJob.model.variant, "high");
+  const saved = store.roomSummary(store.room(room.roomId)).members[0].model;
+  assert.equal(saved.providerName, "Probe");
+  assert.equal(saved.variant, "high");
 });
 
 test("instruction refresh failures on ready members are visible and back off", async () => {
   const { store, engine, roomId, members } = setup({ memberCount: 2 });
   engine.rename(roomId, members[0].id, "新名字");
-  const job = engine.nextJob();
+  let job;
+  for (let guard = 0; guard < 4; guard += 1) {
+    job = engine.nextJob();
+    if (job.type === "put-instructions") break;
+    assert.equal(job.type, "link-session");
+    await engine.jobResult(job, { outcome: "accepted" });
+  }
   assert.equal(job.type, "put-instructions");
   await engine.jobResult(job, { outcome: "failed", error: "temporary instruction error" });
   assert.match(store.member(job.memberId).task_error, /temporary instruction error/);
@@ -590,6 +760,9 @@ test("creating rooms continue through pause and resume never skips missing sessi
     { role: "generic", model: { providerID: "p", id: "b" } },
   ] });
   engine.pause(room.roomId);
+  const rootJob = engine.nextJob();
+  assert.equal(rootJob.type, "create-root-session");
+  await engine.jobResult(rootJob, { outcome: "accepted", sessionId: rootJob.sessionId });
   const first = engine.nextJob();
   assert.equal(first.type, "create-session");
   await engine.jobResult(first, { outcome: "accepted", sessionId: first.sessionId });
@@ -631,9 +804,13 @@ test("a failed instruction task backs off instead of blocking other members", as
     { role: "generic", model: { providerID: "p", id: "a" } },
     { role: "generic", model: { providerID: "p", id: "b" } },
   ] });
+  const rootJob = engine.nextJob();
+  await engine.jobResult(rootJob, { outcome: "accepted", sessionId: rootJob.sessionId });
   const first = engine.nextJob();
+  assert.equal(first.type, "create-session");
   await engine.jobResult(first, { outcome: "accepted", sessionId: first.sessionId });
   const instruction = engine.nextJob();
+  assert.equal(instruction.type, "put-instructions");
   await engine.jobResult(instruction, { outcome: "failed", error: "temporary" });
   const next = engine.nextJob();
   assert.equal(next.type, "create-session");
