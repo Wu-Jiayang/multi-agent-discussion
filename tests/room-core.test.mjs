@@ -132,7 +132,14 @@ test("room root creation failures back off and retry the same deterministic sess
   await engine.jobResult(first, { outcome: "failed", error: "temporary root failure" });
   assert.equal(store.room(room.roomId).root_creation_status, "failed");
   assert.match(store.room(room.roomId).root_creation_error, /temporary root failure/);
-  assert.equal(engine.nextJob(), null);
+  const member = engine.nextJob();
+  assert.equal(member.type, "create-session");
+  assert.equal(member.metadata.openchamber, undefined);
+  await engine.jobResult(member, { outcome: "accepted", sessionId: member.sessionId });
+  assert.equal(store.member(member.memberId).session_linked, 0);
+  const instructions = engine.nextJob();
+  assert.equal(instructions.type, "put-instructions");
+  await engine.jobResult(instructions, { outcome: "accepted" });
   clock += 5000;
   const retry = engine.nextJob();
   assert.equal(retry.jobId, first.jobId);
@@ -150,6 +157,30 @@ test("ended rooms do not gain a new sidebar root", async () => {
   engine.end(room.roomId);
   assert.equal(engine.nextJob(), null);
   assert.equal(store.room(room.roomId).root_creation_status, "pending");
+});
+
+test("root existence check failures are cached instead of blocking every room refresh", async () => {
+  const root = scratch();
+  const store = new RoomStore();
+  let checks = 0;
+  const engine = new RoomEngine(store, {
+    rootSessionProvider: async () => {
+      checks += 1;
+      throw Object.assign(new Error("unavailable"), { status: 503 });
+    },
+  });
+  const room = engine.createRoom({ projectDir: root, tempRoot: root, members: [
+    { role: "generic", model: { providerID: "p", id: "a" } },
+    { role: "reviewer", model: { providerID: "p", id: "b" } },
+  ] });
+  for (let guard = 0; guard < 10; guard += 1) {
+    const job = engine.nextJob();
+    if (!job) break;
+    await engine.jobResult(job, { outcome: "accepted", sessionId: job.sessionId });
+  }
+  await engine.roomState(room.roomId);
+  await engine.roomState(room.roomId);
+  assert.equal(checks, 1);
 });
 
 test("a deleted room root is rebuilt and member links are restored", async () => {

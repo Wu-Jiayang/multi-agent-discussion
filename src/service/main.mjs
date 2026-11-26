@@ -172,7 +172,8 @@ export function createDiscussionService(options = {}) {
     }
     entries.sort((a, b) => a.kind !== b.kind ? (a.kind === "directory" ? -1 : 1) : a.name.localeCompare(b.name, "zh-CN"));
     return {
-      path: target, parentPath: target === base ? null : resolve(target, ".."), entries,
+      rootPath: base, path: target, relativePath: relative(base, target),
+      parentPath: target === base ? null : resolve(target, ".."), entries,
     };
   }
 

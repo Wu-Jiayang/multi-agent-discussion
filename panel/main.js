@@ -3005,7 +3005,7 @@ ${GUEST_UI_LOOK_CSS}`;
     else if (state.modelError) {
       text = `\u6A21\u578B\u76EE\u5F55\u8BFB\u53D6\u5931\u8D25\uFF1A${state.modelError.message || state.modelError}`;
       retry = true;
-    } else if (state.modelSource === "global") text = "\u8BE5\u9879\u76EE\u6A21\u578B\u76EE\u5F55\u5C1A\u672A\u52A0\u8F7D\uFF0C\u5F53\u524D\u663E\u793A\u5168\u5C40\u76EE\u5F55\uFF1B\u521B\u5EFA\u65F6\u4F1A\u6309\u9879\u76EE\u914D\u7F6E\u6821\u9A8C\u3002";
+    } else if (state.modelSource === "global") text = "\u8BE5\u9879\u76EE\u6A21\u578B\u76EE\u5F55\u5C1A\u672A\u52A0\u8F7D\uFF0C\u5F53\u524D\u663E\u793A\u6765\u81EA\u5176\u4ED6\u9879\u76EE\u7684\u6A21\u578B\u76EE\u5F55\uFF0C\u53EF\u80FD\u4E0D\u53EF\u7528\uFF1B\u521B\u5EFA\u5931\u8D25\u65F6\u4F1A\u663E\u793A\u5177\u4F53\u9519\u8BEF\u3002";
     else if (state.modelSource === "empty") {
       text = state.projectDir ? "\u8BE5\u9879\u76EE\u6682\u65E0\u53EF\u7528\u6A21\u578B\u76EE\u5F55\u3002" : "\u5C1A\u672A\u8BFB\u53D6\u5230\u53EF\u7528\u6A21\u578B\u76EE\u5F55\u3002";
       retry = true;
@@ -3273,7 +3273,7 @@ ${GUEST_UI_LOOK_CSS}`;
     const rootPill = rootStatus === "ready" ? "running" : rootStatus === "failed" ? "unknown" : "waiting-human";
     const rootChip = rootStatus || room.rootSessionId ? `<span class="member-chip root-session"><span>\u6839\u4F1A\u8BDD</span>${rootStatus ? `<span class="pill ${rootPill}">${escape(rootStatusLabels[rootStatus] || rootStatus)}</span>` : ""}${room.rootSessionId ? `<button data-action="open-root-session" data-session="${escape(room.rootSessionId)}">\u4F1A\u8BDD\u7EC4</button>` : ""}</span>` : "";
     $("#room-header").innerHTML = `
-    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">\u4EBA\u7C7B \xB7 \u623F\u4E3B</span></span>${room.members.map((member) => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">\u521B\u5EFA\u5931\u8D25\uFF1A${escape(member.creationError || "\u672A\u77E5\u539F\u56E0")}</span>` : member.taskError ? `<span class="pill waiting-human">\u6307\u4EE4\u540C\u6B65\u5931\u8D25\uFF1A${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">\u4F1A\u8BDD</button>` : ""}</span>`).join("")}</div></div>
+    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">\u4EBA\u7C7B \xB7 \u623F\u4E3B</span></span>${room.members.map((member) => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">\u521B\u5EFA\u5931\u8D25\uFF1A${escape(member.creationError || "\u672A\u77E5\u539F\u56E0")}</span>` : member.taskError ? `<span class="pill waiting-human">\u4F1A\u8BDD\u540C\u6B65\u5931\u8D25\uFF1A${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">\u4F1A\u8BDD</button>` : ""}</span>`).join("")}</div></div>
     <div class="room-controls">
       <button class="button ghost" data-action="open-workspace">\u6587\u4EF6</button>
       <span class="pill budget">\u4F59\u989D ${room.budget.remaining}/${room.budget.limit} \xB7 \u7B2C ${room.budget.period} \u6BB5</span>
@@ -3555,9 +3555,8 @@ ${GUEST_UI_LOOK_CSS}`;
   }
   function renderWorkspaceBreadcrumb() {
     if (!fileBrowser?.data) return;
-    const root = fileBrowser.rootPath;
-    const current = fileBrowser.data.path;
-    const relativePath = current === root ? "" : current.slice(root.length).replace(/^[\\/]+/, "");
+    const root = fileBrowser.data.rootPath || fileBrowser.rootPath;
+    const relativePath = fileBrowser.data.relativePath || "";
     const parts = relativePath ? relativePath.split(/[\\/]+/) : [];
     let path = root;
     const items = [{ label: "\u623F\u95F4\u6587\u4EF6", path: root }];
@@ -3636,6 +3635,7 @@ ${GUEST_UI_LOOK_CSS}`;
       const data = await request("POST", "/workspace/list", { roomId, path });
       if (!fileBrowser || fileBrowser.roomId !== roomId || fileBrowser.generation !== generation) return;
       fileBrowser.data = data;
+      fileBrowser.rootPath = data.rootPath || fileBrowser.rootPath;
       fileBrowser.path = data.path;
       renderWorkspaceBreadcrumb();
       updateWorkspaceToolbar();
@@ -3664,6 +3664,10 @@ ${GUEST_UI_LOOK_CSS}`;
     try {
       const file = await request("POST", "/workspace/read", { roomId, path });
       if (!fileBrowser || fileBrowser.roomId !== roomId || fileBrowser.generation !== generation) return;
+      if (file.path !== fileBrowser.selectedPath) {
+        fileBrowser.selectedPath = file.path;
+        renderWorkspaceList();
+      }
       if (!file.content) {
         mountModalRoot(root, (target) => mountEmpty(target, { title: "\u6587\u4EF6\u4E3A\u7A7A", body: file.path }));
       } else if (textPreviewable(file.path)) {

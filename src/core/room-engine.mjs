@@ -191,13 +191,17 @@ export class RoomEngine {
     if (!this.rootSessionProvider) return;
     const room = this.store.room(roomId);
     if (room.status === "ended" || room.root_creation_status !== "ready" || !room.root_session_id) return;
-    const checkedAt = this.rootChecks.get(roomId) || 0;
-    if (Date.now() - checkedAt < 30000) return;
+    const previous = this.rootChecks.get(roomId);
+    const interval = previous?.healthy ? 30000 : 5000;
+    if (previous && Date.now() - previous.at < interval) return;
     try {
       await this.rootSessionProvider(room.root_session_id);
-      this.rootChecks.set(roomId, Date.now());
+      this.rootChecks.set(roomId, { at: Date.now(), healthy: true });
     } catch (error) {
-      if (error?.status !== 404) return;
+      if (error?.status !== 404) {
+        this.rootChecks.set(roomId, { at: Date.now(), healthy: false });
+        return;
+      }
       if (this.store.resetMissingRoot(roomId)) this.changed(roomId);
       this.rootChecks.delete(roomId);
     }
@@ -354,8 +358,8 @@ export class RoomEngine {
       if (listed.status === "ended") continue;
       const room = this.store.prepareRoomRoot(listed.roomId);
       const roomId = room.id;
-      if (room.root_creation_status !== "ready") {
-        if (!rootDue(room)) continue;
+      const rootReady = room.root_creation_status === "ready";
+      if (!rootReady && rootDue(room)) {
         this.store.rootTaskAttempt(roomId, now);
         return {
           jobId: `root:${roomId}`, type: "create-root-session", roomId,
@@ -369,10 +373,10 @@ export class RoomEngine {
         const metadata = {
           discussionRoomId: roomId,
           discussionMemberId: member.id,
-          openchamber: { kind: "workflow-agent", parentID: room.root_session_id },
+          ...(rootReady ? { openchamber: { kind: "workflow-agent", parentID: room.root_session_id } } : {}),
         };
         const title = `${room.title} · ${member.display_name}`;
-        if (member.session_id && !member.session_linked) {
+        if (member.session_id && !member.session_linked && rootReady) {
           this.store.taskAttempt(roomId, member.id, now);
           return { jobId: `link:${roomId}:${member.id}`, type: "link-session", roomId, memberId: member.id, sessionId: member.session_id, title, metadata };
         }
@@ -460,7 +464,7 @@ export class RoomEngine {
       if (outcome === "accepted") this.store.rootSessionCreated(job.roomId, result.sessionId, this.now());
       else this.store.rootSessionFailed(job.roomId, result.error || "Room root session creation failed", this.now());
     } else if (job.type === "create-session") {
-      if (outcome === "accepted") this.store.sessionCreated(job.roomId, job.memberId, result.sessionId, this.now());
+      if (outcome === "accepted") this.store.sessionCreated(job.roomId, job.memberId, result.sessionId, this.now(), job.metadata?.openchamber?.parentID != null);
       else this.store.sessionFailed(job.roomId, job.memberId, result.error || "Session creation failed");
     } else if (job.type === "link-session") {
       if (outcome === "accepted") this.store.sessionLinked(job.roomId, job.memberId);

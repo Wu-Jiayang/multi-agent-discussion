@@ -65,7 +65,7 @@ dom=new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html'
         else if(p.path.includes('/answer')){questions=[];room.pendingQuestions=0;data={status:'answered',answerMessageId:'m_answer',messageId:'m_answer',roomSeq:3}}
         else if(p.path.includes('/receipts'))data={messageId:'m_1',human:null,agents:[{memberId:'m_a',displayName:'提案者',kind:'agent',readAt:new Date().toISOString(),source:'model-context'}]};
         else if(p.path==='/rooms/'+room.roomId+'/read')data={marked:1,unread:{unreadCount:0,unreadMentionCount:0,unreadMentions:[]}};
-        else if(p.path==='/workspace/list')data={path:room.workspaceDir,parentPath:null,entries:[{name:'review',path:room.workspaceDir+'/review',relativePath:'review',kind:'directory',size:null,mtime:new Date().toISOString()},{name:'a.md',path:room.workspaceDir+'/a.md',relativePath:'a.md',kind:'file',size:6,mtime:new Date().toISOString()}]};
+        else if(p.path==='/workspace/list')data={rootPath:room.workspaceDir,path:room.workspaceDir,relativePath:'',parentPath:null,entries:[{name:'review',path:room.workspaceDir+'/review',relativePath:'review',kind:'directory',size:null,mtime:new Date().toISOString()},{name:'a.md',path:room.workspaceDir+'/a.md',relativePath:'a.md',kind:'file',size:6,mtime:new Date().toISOString()}]};
         else if(p.path==='/workspace/read')data={path:'/tmp/opencode/Discussions/r_demo/a.md',content:'# 文档'};
         response({id:message.id},{status:200,body:JSON.stringify(data)});return}
       response({id:message.id},{ok:true});
@@ -152,7 +152,7 @@ await waitFor(()=>serviceCalls.some(call=>call.path==='/rooms'&&call.query?.proj
 await waitFor(()=>document.querySelector('#room-header').textContent.includes('根会话创建失败：模拟根会话失败'),'failed root session shows its error');
 document.querySelector('#new-room').click();
 await waitFor(()=>!document.querySelector('#create-view').hidden,'create view after project switch');
-await waitFor(()=>document.querySelector('#model-source-hint').textContent.includes('全局目录'),'global model fallback hint');
+await waitFor(()=>document.querySelector('#model-source-hint').textContent.includes('其他项目'),'global model fallback hint');
 assert.ok(serviceCalls.some(call=>call.path==='/models'&&call.query?.directory==='/workspace/other'),'models reload for switched project');
 assert.deepEqual(errors,[]);
 console.log('PASS panel DOM smoke: project picker, SDK model picker, create form, role defaults, question answer, composer, receipts modal, global fallback');

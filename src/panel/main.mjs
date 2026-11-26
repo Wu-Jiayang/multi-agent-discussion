@@ -221,7 +221,7 @@ function renderModelSourceHint() {
   let retry = false;
   if (state.modelsLoading) text = "正在读取模型目录…";
   else if (state.modelError) { text = `模型目录读取失败：${state.modelError.message || state.modelError}`; retry = true; }
-  else if (state.modelSource === "global") text = "该项目模型目录尚未加载，当前显示全局目录；创建时会按项目配置校验。";
+  else if (state.modelSource === "global") text = "该项目模型目录尚未加载，当前显示来自其他项目的模型目录，可能不可用；创建失败时会显示具体错误。";
   else if (state.modelSource === "empty") { text = state.projectDir ? "该项目暂无可用模型目录。" : "尚未读取到可用模型目录。"; retry = true; }
   else if (!state.projectDir) text = "尚未选择项目，将使用全局模型目录。";
   el.classList.toggle("warning", retry);
@@ -459,7 +459,7 @@ function renderRoomHeader() {
   const rootPill = rootStatus === "ready" ? "running" : rootStatus === "failed" ? "unknown" : "waiting-human";
   const rootChip = rootStatus || room.rootSessionId ? `<span class="member-chip root-session"><span>根会话</span>${rootStatus ? `<span class="pill ${rootPill}">${escape(rootStatusLabels[rootStatus] || rootStatus)}</span>` : ""}${room.rootSessionId ? `<button data-action="open-root-session" data-session="${escape(room.rootSessionId)}">会话组</button>` : ""}</span>` : "";
   $("#room-header").innerHTML = `
-    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">人类 · 房主</span></span>${room.members.map(member => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">创建失败：${escape(member.creationError || "未知原因")}</span>` : member.taskError ? `<span class="pill waiting-human">指令同步失败：${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">会话</button>` : ""}</span>`).join("")}</div></div>
+    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">人类 · 房主</span></span>${room.members.map(member => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">创建失败：${escape(member.creationError || "未知原因")}</span>` : member.taskError ? `<span class="pill waiting-human">会话同步失败：${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">会话</button>` : ""}</span>`).join("")}</div></div>
     <div class="room-controls">
       <button class="button ghost" data-action="open-workspace">文件</button>
       <span class="pill budget">余额 ${room.budget.remaining}/${room.budget.limit} · 第 ${room.budget.period} 段</span>
@@ -722,9 +722,8 @@ function showModal(title, content) {
 }
 function renderWorkspaceBreadcrumb() {
   if (!fileBrowser?.data) return;
-  const root = fileBrowser.rootPath;
-  const current = fileBrowser.data.path;
-  const relativePath = current === root ? "" : current.slice(root.length).replace(/^[\\/]+/, "");
+  const root = fileBrowser.data.rootPath || fileBrowser.rootPath;
+  const relativePath = fileBrowser.data.relativePath || "";
   const parts = relativePath ? relativePath.split(/[\\/]+/) : [];
   let path = root;
   const items = [{ label: "房间文件", path: root }];
@@ -795,6 +794,7 @@ async function loadWorkspaceDirectory(path, previewPath = null) {
     const data = await request("POST", "/workspace/list", { roomId, path });
     if (!fileBrowser || fileBrowser.roomId !== roomId || fileBrowser.generation !== generation) return;
     fileBrowser.data = data;
+    fileBrowser.rootPath = data.rootPath || fileBrowser.rootPath;
     fileBrowser.path = data.path;
     renderWorkspaceBreadcrumb();
     updateWorkspaceToolbar();
@@ -821,6 +821,10 @@ async function previewWorkspacePath(path) {
   try {
     const file = await request("POST", "/workspace/read", { roomId, path });
     if (!fileBrowser || fileBrowser.roomId !== roomId || fileBrowser.generation !== generation) return;
+    if (file.path !== fileBrowser.selectedPath) {
+      fileBrowser.selectedPath = file.path;
+      renderWorkspaceList();
+    }
     if (!file.content) {
       mountModalRoot(root, target => mountEmpty(target, { title: "文件为空", body: file.path }));
     } else if (textPreviewable(file.path)) {

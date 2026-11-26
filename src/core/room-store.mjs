@@ -360,11 +360,11 @@ export class RoomStore {
     this.db.prepare("UPDATE members SET session_linked=1,next_attempt_at=NULL,task_error=NULL WHERE id=? AND room_id=?").run(memberId, roomId);
   }
 
-  sessionCreated(roomId, memberId, sessionID, now = new Date().toISOString()) {
+  sessionCreated(roomId, memberId, sessionID, now = new Date().toISOString(), linked = false) {
     this.room(roomId); this.member(memberId);
     this.tx(() => {
-      this.db.prepare("UPDATE members SET session_id=?,creation_status='session-created',creation_error=NULL,next_attempt_at=NULL,task_error=NULL,session_linked=1 WHERE id=? AND room_id=? AND session_id IS NULL")
-        .run(sessionID, memberId, roomId);
+      this.db.prepare("UPDATE members SET session_id=?,creation_status='session-created',creation_error=NULL,next_attempt_at=NULL,task_error=NULL,session_linked=? WHERE id=? AND room_id=? AND session_id IS NULL")
+        .run(sessionID, linked ? 1 : 0, memberId, roomId);
       this.finishCreationIfReady(roomId, now);
     });
   }
