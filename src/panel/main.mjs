@@ -4,8 +4,6 @@ import { applyHostReady, mountBanner, mountButton, mountEmpty, mountList, mountS
 const host = connectHost();
 const $ = selector => document.querySelector(selector);
 const app = $("#app");
-let surface = "";
-let dialogProjectHandle = null;
 const state = {
   directory: null, projectDir: null, projectId: null, projectManual: false,
   projects: [], projectsState: "loading", projectsError: null,
@@ -37,37 +35,6 @@ function showError(error) {
   el.hidden = false;
 }
 function clearError() { $("#error").hidden = true; }
-function titleFromItem(item) {
-  if (!item) return null;
-  if (item.kind === "session") return `${item.sessionTitle || "会话"} · 讨论室`;
-  if (item.kind === "message") {
-    const line = String(item.text || "").trim().split(/\r?\n/)[0] || "";
-    if (!line) return null;
-    return line.length > 60 ? `${line.slice(0, 60)}…` : line;
-  }
-  return null;
-}
-function applyDialogItem(item) {
-  if (surface !== "dialog") return false;
-  const directory = item?.directory;
-  let changed = false;
-  if (directory && directory !== state.projectDir) {
-    state.projectDir = directory;
-    state.projectId = null;
-    state.projectManual = true;
-    changed = true;
-  }
-  const title = titleFromItem(item);
-  if (title) state.createTitle = title;
-  if (changed) { resolveProjectSelection(); updateProjectPicker(); }
-  return changed;
-}
-host.onItem(item => {
-  if (surface !== "dialog") return;
-  const changed = applyDialogItem(item);
-  if (changed) void reloadProjectContext();
-  else if (!$("#create-view").hidden) renderCreate();
-});
 async function request(method, path, body, query) {
   const result = await host.serviceRequest({ method, path, query: query && Object.fromEntries(Object.entries(query).filter(([, value]) => value != null && value !== "").map(([key, value]) => [key, String(value)])), body: body == null ? undefined : JSON.stringify(body) });
   let data = null;
@@ -141,17 +108,15 @@ function renderProjectHint() {
   el.hidden = !text;
 }
 function updateProjectPicker() {
-  if (!projectSelectHandle && !dialogProjectHandle) return;
+  if (!projectSelectHandle) return;
   const options = projectOptions();
   const value = options.some(option => option.id === state.projectId) ? state.projectId : null;
-  const update = {
+  projectSelectHandle.update({
     options,
     value,
     disabled: state.projectsState === "loading",
     placeholder: options.length ? "选择项目" : state.projectsState === "loading" ? "读取项目…" : "没有可用项目",
-  };
-  projectSelectHandle?.update(update);
-  dialogProjectHandle?.update(update);
+  });
   renderProjectHint();
 }
 function applyProjectsSnapshot(snapshot) {
@@ -192,8 +157,11 @@ function subscribeProjects() {
     updateProjectPicker();
   });
 }
-function projectPickerConfig() {
-  return {
+function mountProjectPicker() {
+  if (projectSelectHandle) return;
+  const root = $("#project-picker");
+  if (!root) return;
+  projectSelectHandle = mountSelect(root, {
     label: "房间所属项目",
     value: null,
     options: [],
@@ -202,18 +170,8 @@ function projectPickerConfig() {
     searchable: true,
     searchPlaceholder: "搜索项目",
     disabled: true,
-  };
-}
-function mountProjectPicker() {
-  const root = $("#project-picker");
-  if (root && !projectSelectHandle) projectSelectHandle = mountSelect(root, projectPickerConfig());
-  const dialogRoot = $("#dialog-project-picker");
-  if (dialogRoot && !dialogProjectHandle) dialogProjectHandle = mountSelect(dialogRoot, projectPickerConfig());
-  if (projectSelectHandle || dialogProjectHandle) updateProjectPicker();
-}
-function disposeDialogProjectPicker() {
-  dialogProjectHandle?.dispose();
-  dialogProjectHandle = null;
+  });
+  updateProjectPicker();
 }
 function selectProject(id) {
   const option = projectOptions().find(item => item.id === id);
@@ -389,14 +347,11 @@ function defaultName(role, index, rows) {
 }
 function renderCreate() {
   disposeModelHandles();
-  disposeDialogProjectPicker();
   const preset = state.createPreset || "generic";
-  const dialog = surface === "dialog";
   $("#create-view").innerHTML = `
     <h1>新建讨论室</h1>
-    <p class="intro">${dialog ? "从这里配置成员并创建房间；建房本身不会调用模型。" : "每个房间创建一个根会话；成员会话显示在根会话下方，也可从成员“会话”按钮打开。建房本身不会调用模型。"}</p>
+    <p class="intro">每个房间创建一个根会话；成员会话显示在根会话下方，也可从成员“会话”按钮打开。建房本身不会调用模型。</p>
     <div class="form-grid">
-      ${dialog ? `<div class="field"><label>房间所属项目</label><div id="dialog-project-picker"></div></div>` : ""}
       <div class="field"><label>房间名称</label><input id="create-title" value="${escape(state.createTitle || "新的讨论室")}" maxlength="120"></div>
       <div class="field"><label>预设</label><select id="create-preset"><option value="generic" ${preset === "generic" ? "selected" : ""}>普通讨论</option><option value="debate" ${preset === "debate" ? "selected" : ""}>双模型辩论</option></select></div>
       <div class="field"><label>房主显示名</label><input id="create-human" value="${escape(state.createHumanName)}" maxlength="80"></div>
@@ -418,7 +373,6 @@ function renderCreate() {
     ${!state.projectDir ? `<p class="intro">请先选择房间所属项目。</p>` : ""}
   `;
   mountCreateModelPickers();
-  if (dialog) mountProjectPicker();
   updateCreateActions();
   renderModelSourceHint();
 }
@@ -1045,11 +999,7 @@ app.addEventListener("click", async event => {
   if (!button) return;
   const action = button.dataset.action;
   if (action === "select-question" && event.target.closest("form,button,select,textarea,input")) return;
-  if (action === "cancel-create") {
-    if (surface === "dialog") { await host.close(); return; }
-    if (state.rooms[0]) { hideCreate(); await selectRoom(state.rooms[0].roomId); } else showCreate();
-    return;
-  }
+  if (action === "cancel-create") { if (state.rooms[0]) { hideCreate(); await selectRoom(state.rooms[0].roomId); } else showCreate(); return; }
   if (action === "retry-models") { void refreshModels(true); return; }
   if (action === "add-agent" && state.createAgents.length < 8) {
     const index = state.createAgents.length;
@@ -1193,14 +1143,6 @@ mountProjectPicker();
 let readyGeneration = 0;
 host.onReady(async ctx => {
   applyHostReady(ctx, document.documentElement);
-  surface = ctx.surface || "";
-  const isDialog = surface === "dialog";
-  document.documentElement.classList.toggle("dialog-mode", isDialog);
-  if (isDialog) {
-    state.creating = true;
-    applyDialogItem(ctx.item || null);
-    showCreate();
-  }
   const generation = ++readyGeneration;
   const directoryChanged = ctx.directory !== state.directory;
   const previousProjectDir = state.projectDir;
@@ -1217,7 +1159,7 @@ host.onReady(async ctx => {
     resolveProjectSelection();
     updateProjectPicker();
   }
-  if (state.projectDir === previousProjectDir && !isDialog) return;
+  if (state.projectDir === previousProjectDir) return;
   const context = ++state.contextGeneration;
   state.roomId = null; state.rooms = []; state.pendingView = null;
   if (state.projectDir) {
