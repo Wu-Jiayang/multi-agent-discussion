@@ -288,7 +288,7 @@ export class RoomEngine {
     if (result.changed) this.store.diagnostic("execution-event", { roomId: member.room_id, memberId: member.id, sessionId: sessionID, type, eventId: eventID || null, error: result.error, changed: true });
     if (result.terminal && type === "failed") {
       if (isProviderQuotaError(error)) {
-        const refunded = this.store.refundAcceptedRemindersForRound(member.id, result.member.execution_round - 1, now);
+        const refunded = this.store.refundAcceptedRemindersForRound(member.id, result.member.execution_round, now);
         if (this.store.room(member.room_id).status !== "ended") this.store.pauseRoom(member.room_id, "provider-quota", now);
         this.store.diagnostic("provider-quota-pause", { roomId: member.room_id, memberId: member.id, sessionId: sessionID, error: result.error, refundedReminderIds: refunded.map(reminder => reminder.id) });
       }
@@ -464,13 +464,16 @@ export class RoomEngine {
       }
       reminder = this.store.refreshReminder(reminder.id, this.now());
       if (!reminder?.unread_count) { this.store.cancelReminder(candidate.id, "Messages were read before dispatch"); continue; }
+      // Queue starts the next round; steer joins the running round. Unknown retries keep the first recorded target.
+      const retryUnknown = reminder.status === "unknown";
+      const executionRound = retryUnknown ? reminder.execution_round : member.execution_round + (status === "idle" ? 1 : 0);
       const reserved = this.store.reserveReminder(reminder.id, this.now());
       if (!reserved) continue;
-      this.store.markSubmitting(reminder.id, this.now());
+      this.store.markSubmitting(reminder.id, this.now(), executionRound);
       const summary = this.store.unreadSummary(reminder.room_id, reminder.member_id, []);
       if (!summary.unreadCount) { this.store.ackReminder(reminder.id, "failed", "Messages were read before submission"); continue; }
       const payload = { ...reminder, unread_count: summary.unreadCount, unread_mention_count: summary.unreadMentionCount, unread_mentions: summary.unreadMentions };
-      this.store.diagnostic("reminder-submitting", { roomId: reminder.room_id, memberId: reminder.member_id, reminderId: reminder.id, kind: reminder.kind, snapshotSeq: reminder.snapshot_seq, unreadCount: summary.unreadCount, budgetRemaining: this.store.room(reminder.room_id).budget_remaining });
+      this.store.diagnostic("reminder-submitting", { roomId: reminder.room_id, memberId: reminder.member_id, reminderId: reminder.id, kind: reminder.kind, snapshotSeq: reminder.snapshot_seq, executionRound, unreadCount: summary.unreadCount, budgetRemaining: this.store.room(reminder.room_id).budget_remaining });
       this.changed(reminder.room_id);
       return {
         jobId: reminder.id, type: "submit-reminder", roomId: reminder.room_id, memberId: reminder.member_id,

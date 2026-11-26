@@ -66,7 +66,7 @@ dom=new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html'
         else if(p.path.includes('/context'))data={items:messages};
         else if(p.path==='/rooms/'+room.roomId+'/questions')data=p.query?.cursor?{items:questions.slice(1),status:'pending',nextCursor:null}:{items:questions.slice(0,1),status:'pending',nextCursor:'next-page'};
         else if(p.path==='/rooms/'+room.roomId+'/mentions')data={items:[...members.map(m=>({id:m.memberId,label:m.displayName,kind:'agent'})),{id:'@all',label:'所有人',kind:'all'}]};
-        else if(p.path.startsWith('/rooms/'+room.roomId+'/members/')&&p.path.endsWith('/model')&&p.method==='POST'){const input=JSON.parse(p.body);const memberId=p.path.split('/')[4];const member=room.members.find(item=>item.memberId===memberId);if(member){member.model=input;member.lastError=null;member.failureCount=0;member.wakeBackoffUntil=null;}data={status:'updated',memberId,model:input}}
+        else if(p.path.startsWith('/rooms/'+room.roomId+'/members/')&&p.path.endsWith('/model')&&p.method==='POST'){const input=JSON.parse(p.body);const memberId=p.path.split('/')[4];const member=room.members.find(item=>item.memberId===memberId);if(member){member.model=input.model;member.lastError=null;member.failureCount=0;member.wakeBackoffUntil=null;}data={status:'updated',memberId,model:input.model}}
         else if(p.path==='/rooms/'+room.roomId+'/messages'&&p.method==='POST'){const input=JSON.parse(p.body);const seq=room.latestSeq+1;const message={messageId:'m_new_'+seq,roomSeq:seq,author:room.human,isOwn:true,kind:'post',createdAt:new Date().toISOString(),mentions:[],mentionAll:false,replyToMessageId:input.replyToMessageId||null,questionId:null,questionStatus:null,answerMessageId:null,label:'[#'+seq+' 房主 · 人类 · 你]',text:input.text,options:[],full:true,preview:false};messages.push(message);room.latestSeq=seq;data={status:'stored',messageId:message.messageId,roomSeq:seq,timeline:messages.slice(-8)}}
         else if(p.path.includes('/answer')){questions=[];room.pendingQuestions=0;data={status:'answered',answerMessageId:'m_answer',messageId:'m_answer',roomSeq:3}}
         else if(p.path.includes('/withdraw')){const questionId=p.path.split('/')[4];questions=questions.filter(item=>item.questionId!==questionId);room.pendingQuestions=questions.length;data={status:'withdrawn',questionId}}
@@ -123,7 +123,7 @@ document.querySelector('#modal-content [data-action="submit-member-model"]').cli
 const modelPath='/rooms/'+room.roomId+'/members/'+members[0].memberId+'/model';
 await waitFor(()=>serviceCalls.some(call=>call.path===modelPath&&call.method==='POST'),'member model update');
 const modelCall=serviceCalls.find(call=>call.path===modelPath&&call.method==='POST');
-assert.deepEqual(JSON.parse(modelCall.body),{providerID:'probe',id:'b',name:'模型 B',providerName:'Probe'},'member model update sends the full model object');
+assert.deepEqual(JSON.parse(modelCall.body),{model:{providerID:'probe',id:'b',name:'模型 B',providerName:'Probe'}},'member model update matches the service request contract');
 await waitFor(()=>!document.querySelector('#modal').hasAttribute('open'),'member model modal closes');
 await waitFor(()=>hostCalls.some(call=>call.type==='toast'&&call.payload?.message.includes('更换为')),'member model toast');
 await waitFor(()=>[...document.querySelectorAll('#room-header .member-chip')].some(chip=>chip.textContent.includes('提案者')&&chip.textContent.includes('Probe · 模型 B')),'member model refreshed');

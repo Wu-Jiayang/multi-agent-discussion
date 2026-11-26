@@ -158,7 +158,8 @@ export class RoomStore {
         before_json TEXT, after_json TEXT, created_at TEXT NOT NULL
       );
     `);
-    const previousSchema = this.db.prepare("SELECT value FROM meta WHERE key='schema'").get()?.value || "0";
+    const schemaVersion = 6;
+    const previousSchema = Number(this.db.prepare("SELECT value FROM meta WHERE key='schema'").get()?.value || 0);
     const roomColumns = new Set(this.db.prepare("PRAGMA table_info(rooms)").all().map(row => row.name));
     for (const [name, definition] of Object.entries({
       root_session_id: "TEXT", root_creation_status: "TEXT NOT NULL DEFAULT 'pending'",
@@ -178,7 +179,7 @@ export class RoomStore {
     })) {
       if (!memberColumns.has(name)) this.db.exec(`ALTER TABLE members ADD COLUMN ${name} ${definition}`);
     }
-    if (previousSchema !== "6") {
+    if (previousSchema < schemaVersion) {
       this.db.exec("UPDATE members SET session_linked=0 WHERE kind='agent' AND session_id IS NOT NULL");
       this.db.exec("UPDATE rooms SET root_creation_status='pending',root_creation_error='正在更新会话组说明',root_next_attempt_at=NULL WHERE status<>'ended' AND root_creation_status='ready' AND root_session_id IS NOT NULL");
     }
@@ -186,7 +187,7 @@ export class RoomStore {
     if (!presentationColumns.has("observed_at")) this.db.exec("ALTER TABLE presentations ADD COLUMN observed_at TEXT");
     const periodColumns = new Set(this.db.prepare("PRAGMA table_info(budget_periods)").all().map(row => row.name));
     if (!periodColumns.has("used_count")) this.db.exec("ALTER TABLE budget_periods ADD COLUMN used_count INTEGER NOT NULL DEFAULT 0");
-    if (previousSchema !== "3") {
+    if (previousSchema < 3) {
       this.db.exec(`
         UPDATE reminders SET charged=0 WHERE refunded=1;
         UPDATE reminders SET charged=0,refunded=1 WHERE status IN ('failed','covered','cancelled');
@@ -199,7 +200,9 @@ export class RoomStore {
           WHERE budget_periods.room_id=rooms.id AND budget_periods.period=rooms.budget_period));
       `);
     }
-    this.db.prepare("INSERT INTO meta(key,value) VALUES('schema','6') ON CONFLICT(key) DO UPDATE SET value='6'").run();
+    if (previousSchema < schemaVersion) {
+      this.db.prepare("INSERT INTO meta(key,value) VALUES('schema',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(schemaVersion));
+    }
   }
 
   close() { this.db.close(); }
@@ -1088,9 +1091,9 @@ export class RoomStore {
     });
   }
 
-  markSubmitting(reminderId, now = new Date().toISOString()) {
+  markSubmitting(reminderId, now = new Date().toISOString(), executionRound = null) {
     const leaseUntil = new Date(Date.parse(now) + 15000).toISOString();
-    this.db.prepare("UPDATE reminders SET status='submitting',updated_at=?,lease_until=? WHERE id=?").run(now, leaseUntil, reminderId);
+    this.db.prepare("UPDATE reminders SET status='submitting',execution_round=COALESCE(?,execution_round),updated_at=?,lease_until=? WHERE id=?").run(executionRound, now, leaseUntil, reminderId);
   }
 
   recoverExpiredReminders(now = new Date().toISOString()) {

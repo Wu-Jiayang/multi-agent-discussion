@@ -152,6 +152,27 @@ test("schema 6 migration re-links existing member sessions as visible operator c
   } finally { upgraded.close(); }
 });
 
+test("newer schema markers do not rerun one-time migrations or downgrade the database", () => {
+  const filename = join(scratch(), "rooms.sqlite");
+  const existing = new RoomStore(filename);
+  const engine = new RoomEngine(existing);
+  const room = engine.createRoom({ projectDir: scratch(), tempRoot: scratch(), members: [
+    { role: "generic", model: { providerID: "p", id: "a" } },
+    { role: "reviewer", model: { providerID: "p", id: "b" } },
+  ] });
+  existing.db.prepare("UPDATE rooms SET root_session_id='ses_newer_root',root_creation_status='ready' WHERE id=?").run(room.roomId);
+  existing.db.prepare("UPDATE members SET session_id='ses_newer_member_'||id,creation_status='ready',instructions_added=1,session_linked=1 WHERE room_id=? AND kind='agent'").run(room.roomId);
+  existing.db.prepare("UPDATE meta SET value='7' WHERE key='schema'").run();
+  existing.close();
+
+  const reopened = new RoomStore(filename);
+  try {
+    assert.equal(reopened.db.prepare("SELECT value FROM meta WHERE key='schema'").get().value, "7");
+    assert.equal(reopened.room(room.roomId).root_creation_status, "ready");
+    assert.equal(reopened.agents(room.roomId)[0].session_linked, 1);
+  } finally { reopened.close(); }
+});
+
 test("room root creation failures back off and retry the same deterministic session", async () => {
   const root = scratch();
   const store = new RoomStore();
@@ -629,6 +650,37 @@ test("provider quota failures refund the reminder and pause automatic wakeups", 
   assert.equal(store.room(roomId).status, "ready");
   assert.equal(store.member(members[0].id).failure_count, 0);
   assert.equal(store.member(members[0].id).wake_backoff_until, null);
+});
+
+test("running steer quota failure refunds only its own execution round", async () => {
+  const { store, engine, roomId, members, setStatus } = setup({ memberCount: 2 });
+  const member = members[0];
+  engine.post(roomId, human(store, roomId), { text: "上一轮普通提醒" });
+  await engine.flush();
+  const previous = await engine.dispatchNext();
+  assert.equal(previous.delivery, "queue");
+  await engine.jobResult(previous, { outcome: "accepted" });
+  assert.equal(store.room(roomId).budget_remaining, 49);
+  assert.equal(store.db.prepare("SELECT execution_round FROM reminders WHERE id=?").get(previous.jobId).execution_round, 1);
+
+  store.db.prepare("UPDATE members SET execution_round=2,last_status='running',last_terminal_round=1 WHERE id=?").run(member.id);
+  setStatus(0, "running");
+  engine.post(roomId, human(store, roomId), { text: "当前轮点名", mentionMemberIds: [member.id] });
+  const urgent = await engine.dispatchNext();
+  assert.equal(urgent.delivery, "steer");
+  await engine.jobResult(urgent, { outcome: "accepted" });
+  assert.equal(store.room(roomId).budget_remaining, 48);
+  assert.equal(store.db.prepare("SELECT execution_round FROM reminders WHERE id=?").get(urgent.jobId).execution_round, 2);
+
+  engine.executionEvent(member.session_id, "failed", "quota-steer", { type: "QuotaExceeded", message: "Insufficient balance" });
+  const previousReminder = store.db.prepare("SELECT * FROM reminders WHERE id=?").get(previous.jobId);
+  const urgentReminder = store.db.prepare("SELECT * FROM reminders WHERE id=?").get(urgent.jobId);
+  assert.equal(previousReminder.charged, 1);
+  assert.equal(previousReminder.refunded, 0);
+  assert.equal(urgentReminder.charged, 0);
+  assert.equal(urgentReminder.refunded, 1);
+  assert.equal(store.room(roomId).budget_remaining, 49);
+  assert.equal(store.room(roomId).paused_reason, "provider-quota");
 });
 
 test("ordinary execution failures use increasing wake backoff", async () => {

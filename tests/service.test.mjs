@@ -111,6 +111,9 @@ test("HTTP service authenticates host/plugin separately and creates rooms withou
     const changed = await f.call("POST", `/rooms/${created.roomId}/members/${room.members[0].memberId}/model`, { model: { providerID: "probe", id: "replacement", name: "Replacement", providerName: "Probe" } });
     assert.equal(changed.data.model.id, "replacement");
     assert.equal(changed.data.modelSynced, false);
+    const flatModel = await f.call("POST", `/rooms/${created.roomId}/members/${room.members[0].memberId}/model`, { providerID: "probe", id: "wrong-shape" });
+    assert.equal(flatModel.status, 400);
+    assert.equal(flatModel.data.error.code, "ROOM_INVALID_INPUT");
     const modelJobs = await f.drainJobs();
     assert.equal(modelJobs.filter(job => job.type === "change-session-model").length, 1);
   } finally { await f.close(); }

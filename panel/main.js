@@ -3610,7 +3610,7 @@ ${GUEST_UI_LOOK_CSS}`;
     const body = { providerID: model.providerID, id: model.id, name: model.name || model.id, providerName: model.providerName || model.providerID, ...model.variant ? { variant: model.variant } : {} };
     memberModelPicker.submitting = true;
     try {
-      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/members/${encodeURIComponent(member.memberId)}/model`, body);
+      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/members/${encodeURIComponent(member.memberId)}/model`, { model: body });
       $("#modal").close();
       await refreshRoom();
       toast(`\u5DF2\u5C06 ${member.displayName} \u66F4\u6362\u4E3A ${body.providerName} \xB7 ${body.name}${body.variant ? ` (${body.variant})` : ""}\u3002`, "success");

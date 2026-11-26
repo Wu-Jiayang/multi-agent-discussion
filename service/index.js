@@ -9429,7 +9429,8 @@ var RoomStore = class {
         before_json TEXT, after_json TEXT, created_at TEXT NOT NULL
       );
     `);
-    const previousSchema = this.db.prepare("SELECT value FROM meta WHERE key='schema'").get()?.value || "0";
+    const schemaVersion = 6;
+    const previousSchema = Number(this.db.prepare("SELECT value FROM meta WHERE key='schema'").get()?.value || 0);
     const roomColumns = new Set(this.db.prepare("PRAGMA table_info(rooms)").all().map((row) => row.name));
     for (const [name, definition] of Object.entries({
       root_session_id: "TEXT",
@@ -9458,7 +9459,7 @@ var RoomStore = class {
     })) {
       if (!memberColumns.has(name)) this.db.exec(`ALTER TABLE members ADD COLUMN ${name} ${definition}`);
     }
-    if (previousSchema !== "6") {
+    if (previousSchema < schemaVersion) {
       this.db.exec("UPDATE members SET session_linked=0 WHERE kind='agent' AND session_id IS NOT NULL");
       this.db.exec("UPDATE rooms SET root_creation_status='pending',root_creation_error='\u6B63\u5728\u66F4\u65B0\u4F1A\u8BDD\u7EC4\u8BF4\u660E',root_next_attempt_at=NULL WHERE status<>'ended' AND root_creation_status='ready' AND root_session_id IS NOT NULL");
     }
@@ -9466,7 +9467,7 @@ var RoomStore = class {
     if (!presentationColumns.has("observed_at")) this.db.exec("ALTER TABLE presentations ADD COLUMN observed_at TEXT");
     const periodColumns = new Set(this.db.prepare("PRAGMA table_info(budget_periods)").all().map((row) => row.name));
     if (!periodColumns.has("used_count")) this.db.exec("ALTER TABLE budget_periods ADD COLUMN used_count INTEGER NOT NULL DEFAULT 0");
-    if (previousSchema !== "3") {
+    if (previousSchema < 3) {
       this.db.exec(`
         UPDATE reminders SET charged=0 WHERE refunded=1;
         UPDATE reminders SET charged=0,refunded=1 WHERE status IN ('failed','covered','cancelled');
@@ -9479,7 +9480,9 @@ var RoomStore = class {
           WHERE budget_periods.room_id=rooms.id AND budget_periods.period=rooms.budget_period));
       `);
     }
-    this.db.prepare("INSERT INTO meta(key,value) VALUES('schema','6') ON CONFLICT(key) DO UPDATE SET value='6'").run();
+    if (previousSchema < schemaVersion) {
+      this.db.prepare("INSERT INTO meta(key,value) VALUES('schema',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(schemaVersion));
+    }
   }
   close() {
     this.db.close();
@@ -10353,9 +10356,9 @@ ${parse(row.options_json, []).map((option, index) => `${index + 1}. ${option}`).
       return this.db.prepare("SELECT * FROM reminders WHERE id=?").get(reminderId);
     });
   }
-  markSubmitting(reminderId, now = (/* @__PURE__ */ new Date()).toISOString()) {
+  markSubmitting(reminderId, now = (/* @__PURE__ */ new Date()).toISOString(), executionRound = null) {
     const leaseUntil = new Date(Date.parse(now) + 15e3).toISOString();
-    this.db.prepare("UPDATE reminders SET status='submitting',updated_at=?,lease_until=? WHERE id=?").run(now, leaseUntil, reminderId);
+    this.db.prepare("UPDATE reminders SET status='submitting',execution_round=COALESCE(?,execution_round),updated_at=?,lease_until=? WHERE id=?").run(executionRound, now, leaseUntil, reminderId);
   }
   recoverExpiredReminders(now = (/* @__PURE__ */ new Date()).toISOString()) {
     this.db.prepare("UPDATE reminders SET status='unknown',last_error='Unfinished reservation recovered; retry with the same input ID' WHERE status='reserved'").run();
@@ -10831,7 +10834,7 @@ var RoomEngine = class {
     if (result.changed) this.store.diagnostic("execution-event", { roomId: member.room_id, memberId: member.id, sessionId: sessionID, type, eventId: eventID || null, error: result.error, changed: true });
     if (result.terminal && type === "failed") {
       if (isProviderQuotaError(error)) {
-        const refunded = this.store.refundAcceptedRemindersForRound(member.id, result.member.execution_round - 1, now);
+        const refunded = this.store.refundAcceptedRemindersForRound(member.id, result.member.execution_round, now);
         if (this.store.room(member.room_id).status !== "ended") this.store.pauseRoom(member.room_id, "provider-quota", now);
         this.store.diagnostic("provider-quota-pause", { roomId: member.room_id, memberId: member.id, sessionId: sessionID, error: result.error, refundedReminderIds: refunded.map((reminder) => reminder.id) });
       }
@@ -11032,16 +11035,18 @@ var RoomEngine = class {
         this.store.cancelReminder(candidate.id, "Messages were read before dispatch");
         continue;
       }
+      const retryUnknown = reminder.status === "unknown";
+      const executionRound = retryUnknown ? reminder.execution_round : member.execution_round + (status === "idle" ? 1 : 0);
       const reserved = this.store.reserveReminder(reminder.id, this.now());
       if (!reserved) continue;
-      this.store.markSubmitting(reminder.id, this.now());
+      this.store.markSubmitting(reminder.id, this.now(), executionRound);
       const summary = this.store.unreadSummary(reminder.room_id, reminder.member_id, []);
       if (!summary.unreadCount) {
         this.store.ackReminder(reminder.id, "failed", "Messages were read before submission");
         continue;
       }
       const payload = { ...reminder, unread_count: summary.unreadCount, unread_mention_count: summary.unreadMentionCount, unread_mentions: summary.unreadMentions };
-      this.store.diagnostic("reminder-submitting", { roomId: reminder.room_id, memberId: reminder.member_id, reminderId: reminder.id, kind: reminder.kind, snapshotSeq: reminder.snapshot_seq, unreadCount: summary.unreadCount, budgetRemaining: this.store.room(reminder.room_id).budget_remaining });
+      this.store.diagnostic("reminder-submitting", { roomId: reminder.room_id, memberId: reminder.member_id, reminderId: reminder.id, kind: reminder.kind, snapshotSeq: reminder.snapshot_seq, executionRound, unreadCount: summary.unreadCount, budgetRemaining: this.store.room(reminder.room_id).budget_remaining });
       this.changed(reminder.room_id);
       return {
         jobId: reminder.id,
