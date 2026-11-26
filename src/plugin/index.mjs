@@ -214,6 +214,11 @@ export default {
           };
           await ctx.session.update({ sessionID: job.sessionId, title: job.title, metadata });
           result = { outcome: "accepted" };
+        } else if (job.type === "change-session-model") {
+          const model = { providerID: job.model.providerID, id: job.model.id };
+          if (job.model.variant) model.variant = job.model.variant;
+          await ctx.session.switchModel({ sessionID: job.sessionId, model });
+          result = { outcome: "accepted" };
         } else if (job.type === "put-instructions") {
           await ctx.session.instructions.entry.put({ sessionID: job.sessionId, key: job.key, value: job.value });
           result = { outcome: "accepted" };

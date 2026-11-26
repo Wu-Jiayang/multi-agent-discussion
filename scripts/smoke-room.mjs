@@ -104,7 +104,10 @@ async function main() {
   writeFileSync(join(root, "opencode.json"), JSON.stringify({ providers: { probe: {
     name: "Room smoke", env: ["PROBE_API_KEY"], package: "@opencode/ai/providers/openai-compatible",
     settings: { baseURL: `http://127.0.0.1:${modelServer.address().port}/v1` },
-    models: { "fake-model": { name: "Fake model", capabilities: { toolcall: true } } },
+    models: {
+      "fake-model": { name: "Fake model", capabilities: { toolcall: true } },
+      "other-model": { name: "Other fake model", capabilities: { toolcall: true } },
+    },
   } } }));
   const env = {
     PATH: process.env.PATH, HOME: root, TMPDIR: root, PROBE_API_KEY: "mock",
@@ -206,6 +209,14 @@ async function main() {
       const info = await oc(`/api/session/${member.sessionId}`);
       assert.equal(info.data.metadata.openchamber.parentID, room.rootSessionId);
     }
+
+    await service("POST", `/rooms/${roomId}/members/${a.memberId}/model`, { model: { providerID: "probe", id: "other-model", name: "Other fake model", providerName: "Room smoke" } });
+    await until(async () => {
+      room = await service("GET", `/rooms/${roomId}`);
+      return room.members.find(member => member.memberId === a.memberId)?.modelSynced === true;
+    }, "member model switched");
+    const switchedModel = await oc(`/api/session/${a.sessionId}`);
+    assert.equal(switchedModel.data.model.id, "other-model");
 
     writeFileSync(join(room.workspaceDir, "smoke.md"), "# 房间文件");
     const workspaceFiles = await service("POST", "/workspace/list", { roomId });

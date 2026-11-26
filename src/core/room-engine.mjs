@@ -13,6 +13,12 @@ function summarizeToolResult(result) {
   };
 }
 
+function isProviderQuotaError(error) {
+  if (!error) return false;
+  if (error.status === 402) return true;
+  const text = `${error.type || ""} ${error.message || ""} ${error.response?.body || ""}`.toLowerCase();
+  return /insufficient balance|free usage limit reached|quota exceeded|payment required|额度不足|余额不足/.test(text);
+}
 function reminderText(reminder) {
   const mentions = reminder.unread_mentions || [];
   const lines = [
@@ -144,6 +150,7 @@ export class RoomEngine {
     const room = this.store.room(roomId);
     const member = this.store.member(memberId);
     if (room.status !== "ready" || member.creation_status !== "ready") return null;
+    if (member.wake_backoff_until && Date.parse(member.wake_backoff_until) > Date.parse(this.now())) return null;
     const before = this.store.unreadSummary(roomId, memberId, []);
     if (!before.unreadCount) return null;
     const status = await this.queryStatus(member);
@@ -267,12 +274,25 @@ export class RoomEngine {
     return member;
   }
 
-  executionEvent(sessionID, type, eventID) {
+  changeModel(roomId, memberId, model) {
+    const member = this.store.changeMemberModel(roomId, memberId, model, this.now());
+    this.changed(roomId);
+    return member;
+  }
+
+  executionEvent(sessionID, type, eventID, error = null) {
     let member;
     try { member = this.store.memberBySession(sessionID); } catch { return; }
-    const result = this.store.executionEvent(sessionID, type, eventID, this.now());
-    if (result.changed) this.store.diagnostic("execution-event", { roomId: member.room_id, memberId: member.id, sessionId: sessionID, type, eventId: eventID || null, changed: true });
-    if (result.terminal) {
+    const now = this.now();
+    const result = this.store.executionEvent(sessionID, type, eventID, error, now);
+    if (result.changed) this.store.diagnostic("execution-event", { roomId: member.room_id, memberId: member.id, sessionId: sessionID, type, eventId: eventID || null, error: result.error, changed: true });
+    if (result.terminal && type === "failed") {
+      if (isProviderQuotaError(error)) {
+        const refunded = this.store.refundAcceptedRemindersForRound(member.id, result.member.execution_round - 1, now);
+        if (this.store.room(member.room_id).status !== "ended") this.store.pauseRoom(member.room_id, "provider-quota", now);
+        this.store.diagnostic("provider-quota-pause", { roomId: member.room_id, memberId: member.id, sessionId: sessionID, error: result.error, refundedReminderIds: refunded.map(reminder => reminder.id) });
+      }
+    } else if (result.terminal) {
       this.checkMemberLater(member.room_id, member.id);
       const retry = setTimeout(() => this.checkMemberLater(member.room_id, member.id), 100);
       retry.unref?.();
@@ -294,7 +314,7 @@ export class RoomEngine {
       this.waitKinds.delete(sessionID);
     } else if (event.type === "turn-finished" || event.type === "turn-failed") {
       this.waitKinds.delete(sessionID);
-      this.executionEvent(sessionID, event.type === "turn-finished" ? "succeeded" : "failed", `host:${event.id}`);
+      this.executionEvent(sessionID, event.type === "turn-finished" ? "succeeded" : "failed", `host:${event.id}`, event.error || null);
     }
   }
 
@@ -381,6 +401,10 @@ export class RoomEngine {
           return { jobId: `link:${roomId}:${member.id}`, type: "link-session", roomId, memberId: member.id, sessionId: member.session_id, title, metadata };
         }
         if (room.status === "ended") continue;
+        if (member.session_id && !member.model_synced) {
+          this.store.taskAttempt(roomId, member.id, now);
+          return { jobId: `model:${roomId}:${member.id}`, type: "change-session-model", roomId, memberId: member.id, sessionId: member.session_id, model: JSON.parse(member.model_json) };
+        }
         if (!member.session_id && member.creation_status === "pending") {
           this.store.taskAttempt(roomId, member.id, now);
           return {
@@ -469,6 +493,9 @@ export class RoomEngine {
     } else if (job.type === "link-session") {
       if (outcome === "accepted") this.store.sessionLinked(job.roomId, job.memberId);
       else this.store.taskFailed(job.roomId, job.memberId, result.error || "Session grouping failed", this.now());
+    } else if (job.type === "change-session-model") {
+      if (outcome === "accepted") this.store.sessionModelSynced(job.roomId, job.memberId);
+      else this.store.taskFailed(job.roomId, job.memberId, result.error || "Model switch failed", this.now());
     } else if (job.type === "put-instructions") {
       if (outcome === "accepted") this.store.instructionsAdded(job.roomId, job.memberId);
       else if (!this.store.member(job.memberId).instructions_added) this.store.taskFailed(job.roomId, job.memberId, result.error || "Instruction update failed", this.now());

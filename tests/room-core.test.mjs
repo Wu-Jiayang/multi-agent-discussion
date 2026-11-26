@@ -573,6 +573,77 @@ test("model variants survive room creation", async () => {
   assert.equal(saved.variant, "high");
 });
 
+test("provider quota failures refund the reminder and pause automatic wakeups", async () => {
+  const { store, engine, roomId, members } = setup({ memberCount: 2 });
+  engine.post(roomId, human(store, roomId), { text: "额度测试", mentionMemberIds: [members[0].id] });
+  await engine.flush();
+  const job = await engine.dispatchNext();
+  assert.equal(job.memberId, members[0].id);
+  await engine.jobResult(job, { outcome: "accepted" });
+  assert.equal(store.room(roomId).budget_remaining, 49);
+  engine.executionEvent(members[0].session_id, "started", "quota-start");
+  engine.executionEvent(members[0].session_id, "failed", "quota-failed", { type: "QuotaExceeded", message: "Insufficient balance" });
+  const room = store.room(roomId);
+  const member = store.member(members[0].id);
+  assert.equal(room.status, "paused");
+  assert.equal(room.paused_reason, "provider-quota");
+  assert.equal(room.budget_remaining, 50);
+  assert.equal(member.failure_count, 1);
+  assert.match(member.last_error, /Insufficient balance/);
+  assert.equal(Date.parse(member.wake_backoff_until) - Date.parse("2026-11-26T10:00:00.000Z"), 30000);
+  assert.equal(store.dueReminders(roomId).length, 0);
+  engine.resume(roomId, 10);
+  assert.equal(store.room(roomId).status, "ready");
+  assert.equal(store.member(members[0].id).failure_count, 0);
+  assert.equal(store.member(members[0].id).wake_backoff_until, null);
+});
+
+test("ordinary execution failures use increasing wake backoff", async () => {
+  const root = scratch();
+  const store = new RoomStore();
+  let clock = Date.parse("2026-11-26T10:00:00.000Z");
+  const engine = new RoomEngine(store, { now: () => new Date(clock).toISOString(), statusProvider: async () => ({ status: "idle" }) });
+  const room = engine.createRoom({ projectDir: root, tempRoot: root, members: [
+    { role: "generic", model: { providerID: "p", id: "a" } },
+    { role: "generic", model: { providerID: "p", id: "b" } },
+  ] });
+  for (let guard = 0; guard < 10; guard += 1) {
+    const job = engine.nextJob();
+    if (!job) break;
+    await engine.jobResult(job, { outcome: "accepted", sessionId: job.sessionId });
+  }
+  const member = store.agents(room.roomId)[0];
+  for (const [index, delay] of [30000, 60000, 120000].entries()) {
+    engine.post(room.roomId, human(store, room.roomId), { text: `失败 ${index}`, mentionMemberIds: [member.id] });
+    await engine.flush();
+    const job = await engine.dispatchNext();
+    assert.equal(job.memberId, member.id);
+    await engine.jobResult(job, { outcome: "accepted" });
+    engine.executionEvent(member.session_id, "started", `start-${index}`);
+    engine.executionEvent(member.session_id, "failed", `failed-${index}`, { type: "ProviderError", message: "temporary provider failure" });
+    const current = store.member(member.id);
+    assert.equal(current.failure_count, index + 1);
+    assert.equal(Date.parse(current.wake_backoff_until) - clock, delay);
+    assert.equal(store.dueReminders(room.roomId).some(row => row.member_id === member.id), false);
+    clock += delay;
+    await engine.recheckMember(room.roomId, member.id);
+  }
+});
+
+test("changing a member model queues an idempotent session model switch", async () => {
+  const { store, engine, roomId, members } = setup({ memberCount: 2 });
+  const changed = engine.changeModel(roomId, members[0].id, { providerID: "p", id: "replacement", name: "Replacement", providerName: "Probe", variant: "high" });
+  assert.equal(changed.model.id, "replacement");
+  assert.equal(changed.model.providerName, "Probe");
+  assert.equal(changed.modelSynced, false);
+  const job = engine.nextJob();
+  assert.equal(job.type, "change-session-model");
+  assert.equal(job.sessionId, members[0].session_id);
+  assert.deepEqual(job.model, { providerID: "p", id: "replacement", name: "Replacement", providerName: "Probe", variant: "high" });
+  await engine.jobResult(job, { outcome: "accepted" });
+  assert.equal(store.member(members[0].id).model_synced, 1);
+});
+
 test("instruction refresh failures on ready members are visible and back off", async () => {
   const { store, engine, roomId, members } = setup({ memberCount: 2 });
   engine.rename(roomId, members[0].id, "新名字");

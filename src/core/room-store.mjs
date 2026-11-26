@@ -43,6 +43,16 @@ function cleanText(value, label, { required = true, maxChars = 20000 } = {}) {
   if (text.length > maxChars) fail("ROOM_INVALID_INPUT", `${label} is too long.`, { maxChars });
   return text;
 }
+function executionErrorMessage(error) {
+  if (typeof error === "string") return error.slice(0, 2000);
+  const message = error?.message || error?.response?.body || error?.type || "Agent execution failed";
+  return String(message).slice(0, 2000);
+}
+function failureBackoffMs(count) {
+  if (count <= 1) return 30000;
+  if (count === 2) return 60000;
+  return 120000;
+}
 function page(value, fallback, max) {
   if (value == null) return fallback;
   const number = Number(value);
@@ -90,7 +100,9 @@ export class RoomStore {
         idle_epoch INTEGER NOT NULL DEFAULT 0, last_status TEXT,
         last_started_event TEXT, last_terminal_round INTEGER NOT NULL DEFAULT -1,
         next_attempt_at TEXT, task_error TEXT, task_attempts INTEGER NOT NULL DEFAULT 0,
-        session_linked INTEGER NOT NULL DEFAULT 0
+        session_linked INTEGER NOT NULL DEFAULT 0, model_synced INTEGER NOT NULL DEFAULT 1,
+        failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, last_error_at TEXT,
+        wake_backoff_until TEXT
       );
       CREATE UNIQUE INDEX IF NOT EXISTS members_session ON members(session_id) WHERE session_id IS NOT NULL;
       CREATE TABLE IF NOT EXISTS messages (
@@ -159,7 +171,11 @@ export class RoomStore {
       if (!reminderColumns.has(name)) this.db.exec(`ALTER TABLE reminders ADD COLUMN ${name} ${definition}`);
     }
     const memberColumns = new Set(this.db.prepare("PRAGMA table_info(members)").all().map(row => row.name));
-    for (const [name, definition] of Object.entries({ next_attempt_at: "TEXT", task_error: "TEXT", task_attempts: "INTEGER NOT NULL DEFAULT 0", session_linked: "INTEGER NOT NULL DEFAULT 0" })) {
+    for (const [name, definition] of Object.entries({
+      next_attempt_at: "TEXT", task_error: "TEXT", task_attempts: "INTEGER NOT NULL DEFAULT 0",
+      session_linked: "INTEGER NOT NULL DEFAULT 0", model_synced: "INTEGER NOT NULL DEFAULT 1",
+      failure_count: "INTEGER NOT NULL DEFAULT 0", last_error: "TEXT", last_error_at: "TEXT", wake_backoff_until: "TEXT",
+    })) {
       if (!memberColumns.has(name)) this.db.exec(`ALTER TABLE members ADD COLUMN ${name} ${definition}`);
     }
     const presentationColumns = new Set(this.db.prepare("PRAGMA table_info(presentations)").all().map(row => row.name));
@@ -179,7 +195,7 @@ export class RoomStore {
           WHERE budget_periods.room_id=rooms.id AND budget_periods.period=rooms.budget_period));
       `);
     }
-    this.db.prepare("INSERT INTO meta(key,value) VALUES('schema','4') ON CONFLICT(key) DO UPDATE SET value='4'").run();
+    this.db.prepare("INSERT INTO meta(key,value) VALUES('schema','5') ON CONFLICT(key) DO UPDATE SET value='5'").run();
   }
 
   close() { this.db.close(); }
@@ -254,7 +270,9 @@ export class RoomStore {
       role: member.role, roleLabel: ROLE_LABELS[member.role] || member.role,
       model: parse(member.model_json), sessionId: member.session_id,
       creationStatus: member.creation_status, creationError: member.creation_error, taskError: member.task_error,
-      sessionLinked: member.session_linked === 1, sessionStatus: member.last_status || "unknown",
+      sessionLinked: member.session_linked === 1, modelSynced: member.model_synced === 1,
+      failureCount: member.failure_count, lastError: member.last_error, lastErrorAt: member.last_error_at,
+      wakeBackoffUntil: member.wake_backoff_until, sessionStatus: member.last_status || "unknown",
     };
   }
 
@@ -450,6 +468,31 @@ export class RoomStore {
       this.configEvent(roomId, "member-renamed", { memberId, displayName: before.display_name }, { memberId, displayName: name });
     });
     return this.memberView(this.member(memberId));
+  }
+
+  changeMemberModel(roomId, memberId, model, now = new Date().toISOString()) {
+    const room = this.room(roomId);
+    if (room.status === "ended") fail("ROOM_ENDED", "The room has ended.");
+    const member = this.member(memberId);
+    if (member.room_id !== roomId || member.kind !== "agent") fail("ROOM_NOT_FOUND", "Agent member not found.", {}, 404);
+    if (!model || typeof model.providerID !== "string" || typeof model.id !== "string") fail("ROOM_INVALID_INPUT", "A model needs providerID and id.");
+    const normalized = {
+      providerID: model.providerID, id: model.id, name: model.name || model.id,
+      providerName: model.providerName || model.provider?.name || model.providerID,
+      ...(model.variant ? { variant: model.variant } : {}),
+    };
+    this.tx(() => {
+      this.db.prepare(`UPDATE members SET model_json=?,model_synced=CASE WHEN session_id IS NULL THEN 1 ELSE 0 END,
+        failure_count=0,last_error=NULL,last_error_at=NULL,wake_backoff_until=NULL,next_attempt_at=NULL,task_error=NULL WHERE id=? AND room_id=?`)
+        .run(json(normalized), memberId, roomId);
+      this.configEvent(roomId, "member-model-changed", { memberId, model: parse(member.model_json) }, { memberId, model: normalized }, now);
+    });
+    return this.memberView(this.member(memberId));
+  }
+
+  sessionModelSynced(roomId, memberId) {
+    this.room(roomId); this.member(memberId);
+    this.db.prepare("UPDATE members SET model_synced=1,next_attempt_at=NULL,task_error=NULL WHERE id=? AND room_id=?").run(memberId, roomId);
   }
 
   validateMentions(roomId, authorId, input) {
@@ -1051,6 +1094,14 @@ export class RoomStore {
     this.db.prepare("UPDATE reminders SET status='unknown',last_error='Submission lease expired; retry with the same input ID' WHERE status='submitting' AND lease_until<?").run(now);
   }
 
+  refundAcceptedRemindersForRound(memberId, executionRound, now = new Date().toISOString()) {
+    return this.tx(() => {
+      const reminders = this.db.prepare("SELECT * FROM reminders WHERE member_id=? AND execution_round=? AND status='accepted' AND charged=1 AND refunded=0 ORDER BY created_at").all(memberId, executionRound);
+      for (const reminder of reminders) this.refundReminderInTx(reminder, now);
+      return reminders.map(reminder => this.db.prepare("SELECT * FROM reminders WHERE id=?").get(reminder.id));
+    });
+  }
+
   ackReminder(reminderId, outcome, error = null, now = new Date().toISOString()) {
     return this.tx(() => {
       const reminder = this.db.prepare("SELECT * FROM reminders WHERE id=?").get(reminderId);
@@ -1106,10 +1157,11 @@ export class RoomStore {
   dueReminders(roomId = null, limit = 20, now = new Date().toISOString()) {
     const where = `(r.status IN ('pending','reserved','unknown') OR (r.status='submitting' AND r.lease_until<?))
       AND (r.next_attempt_at IS NULL OR r.next_attempt_at<=?)
+      AND (m.wake_backoff_until IS NULL OR m.wake_backoff_until<=?)
       AND (rm.status='ready' OR (rm.status='paused' AND rm.paused_reason='budget' AND r.charged=1 AND r.refunded=0))`;
     const rows = roomId
-      ? this.db.prepare(`SELECT r.* FROM reminders r JOIN rooms rm ON rm.id=r.room_id WHERE r.room_id=? AND ${where} ORDER BY CASE r.kind WHEN 'steer' THEN 0 ELSE 1 END,r.created_at LIMIT ?`).all(roomId, now, now, limit)
-      : this.db.prepare(`SELECT r.* FROM reminders r JOIN rooms rm ON rm.id=r.room_id WHERE ${where} ORDER BY CASE r.kind WHEN 'steer' THEN 0 ELSE 1 END,r.created_at LIMIT ?`).all(now, now, limit);
+      ? this.db.prepare(`SELECT r.* FROM reminders r JOIN rooms rm ON rm.id=r.room_id JOIN members m ON m.id=r.member_id WHERE r.room_id=? AND ${where} ORDER BY CASE r.kind WHEN 'steer' THEN 0 ELSE 1 END,r.created_at LIMIT ?`).all(roomId, now, now, now, limit)
+      : this.db.prepare(`SELECT r.* FROM reminders r JOIN rooms rm ON rm.id=r.room_id JOIN members m ON m.id=r.member_id WHERE ${where} ORDER BY CASE r.kind WHEN 'steer' THEN 0 ELSE 1 END,r.created_at LIMIT ?`).all(now, now, now, limit);
     return rows.map(row => ({ ...row, room: this.room(row.room_id), member: this.member(row.member_id) }));
   }
 
@@ -1130,7 +1182,7 @@ export class RoomStore {
     return this.db.prepare("SELECT * FROM reminders WHERE room_id=? ORDER BY created_at DESC LIMIT ?").all(roomId, limit).map(row => this.reminderView(row));
   }
 
-  executionEvent(sessionID, type, eventID = null, now = new Date().toISOString()) {
+  executionEvent(sessionID, type, eventID = null, error = null, now = new Date().toISOString()) {
     const member = this.memberBySession(sessionID);
     if (type === "started") {
       if (eventID && member.last_started_event === eventID) return { changed: false, member };
@@ -1139,9 +1191,29 @@ export class RoomStore {
       return { changed: true, member: this.member(member.id), terminal: false };
     }
     if (["succeeded", "failed", "interrupted"].includes(type)) {
-      if (member.last_terminal_round === member.execution_round) return { changed: false, member, terminal: true };
-      this.db.prepare("UPDATE members SET last_status='running',last_terminal_round=execution_round WHERE id=?").run(member.id);
-      return { changed: true, member: this.member(member.id), terminal: true };
+      if (member.last_terminal_round === member.execution_round) {
+        if (type === "failed" && error) {
+          const message = executionErrorMessage(error);
+          if (message !== member.last_error) {
+            const retryAt = new Date(Date.parse(now) + failureBackoffMs(member.failure_count)).toISOString();
+            this.db.prepare("UPDATE members SET last_error=?,last_error_at=?,wake_backoff_until=? WHERE id=?").run(message, now, retryAt, member.id);
+            return { changed: true, member: this.member(member.id), terminal: true, error: message };
+          }
+        }
+        return { changed: false, member, terminal: true };
+      }
+      if (type === "succeeded") {
+        this.db.prepare("UPDATE members SET last_status='running',last_terminal_round=execution_round,failure_count=0,last_error=NULL,last_error_at=NULL,wake_backoff_until=NULL WHERE id=?").run(member.id);
+      } else if (type === "failed") {
+        const message = executionErrorMessage(error);
+        const failures = member.failure_count + 1;
+        const retryAt = new Date(Date.parse(now) + failureBackoffMs(failures)).toISOString();
+        this.db.prepare("UPDATE members SET last_status='running',last_terminal_round=execution_round,failure_count=?,last_error=?,last_error_at=?,wake_backoff_until=? WHERE id=?")
+          .run(failures, message, now, retryAt, member.id);
+      } else {
+        this.db.prepare("UPDATE members SET last_status='running',last_terminal_round=execution_round WHERE id=?").run(member.id);
+      }
+      return { changed: true, member: this.member(member.id), terminal: true, error: type === "failed" ? executionErrorMessage(error) : null };
     }
     return { changed: false, member, terminal: false };
   }
@@ -1179,6 +1251,7 @@ export class RoomStore {
       this.db.prepare("UPDATE budget_periods SET ended_at=?,reason=? WHERE room_id=? AND period=?").run(now, room.paused_reason, roomId, room.budget_period);
       this.db.prepare("UPDATE rooms SET status=?,paused_reason=NULL,budget_period=?,budget_limit=?,budget_remaining=? WHERE id=?").run(ready === total ? "ready" : "creating", period, budgetLimit, budgetLimit, roomId);
       this.db.prepare("INSERT INTO budget_periods(room_id,period,limit_count,started_at) VALUES(?,?,?,?)").run(roomId, period, budgetLimit, now);
+      this.db.prepare("UPDATE members SET failure_count=0,last_error=NULL,last_error_at=NULL,wake_backoff_until=NULL WHERE room_id=? AND kind='agent'").run(roomId);
       this.configEvent(roomId, "room-resumed", { period: room.budget_period, remaining: room.budget_remaining }, { period, limit: budgetLimit });
       return this.roomSummary(this.room(roomId));
     });

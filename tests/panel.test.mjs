@@ -25,6 +25,10 @@ store.post(created.roomId,{kind:'human',memberId:created.human.memberId},{text:'
 const room=store.roomSummary(store.room(created.roomId));
 room.members=room.members.map((member,index)=>({...member,sessionId:'ses_'+member.memberId,sessionStatus:index?'running':'idle'}));
 const members=room.members;
+members[0].lastError='probe 返回 401：invalid api key';
+members[0].failureCount=3;
+members[0].wakeBackoffUntil=new Date(Date.now()+3600000).toISOString();
+members[1].modelSynced=false;
 let messages=store.history(room.roomId,{viewerMemberId:room.human.memberId,trackPresentation:false}).items;
 let questions=[{questionId:'q_1',messageId:'m_question_1',roomSeq:2,asker:members[1],createdAt:new Date().toISOString(),status:'pending',text:'选择哪种方案？',options:['甲','乙'],preview:true},{questionId:'q_2',messageId:'m_question_2',roomSeq:3,asker:members[0],createdAt:new Date().toISOString(),status:'pending',text:'第二个问题',options:[],preview:true}];
 function response(m,payload={}){dom.window.dispatchEvent(new dom.window.MessageEvent('message',{data:{channel:'openchamber.sdk',v:1,type:'result',id:m.id,ok:true,payload},source:dom.window.parent}));}
@@ -61,6 +65,7 @@ dom=new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html'
         else if(p.path.includes('/context'))data={items:messages};
         else if(p.path==='/rooms/'+room.roomId+'/questions')data=p.query?.cursor?{items:questions.slice(1),status:'pending',nextCursor:null}:{items:questions.slice(0,1),status:'pending',nextCursor:'next-page'};
         else if(p.path==='/rooms/'+room.roomId+'/mentions')data={items:[...members.map(m=>({id:m.memberId,label:m.displayName,kind:'agent'})),{id:'@all',label:'所有人',kind:'all'}]};
+        else if(p.path.startsWith('/rooms/'+room.roomId+'/members/')&&p.path.endsWith('/model')&&p.method==='POST'){const input=JSON.parse(p.body);const memberId=p.path.split('/')[4];const member=room.members.find(item=>item.memberId===memberId);if(member){member.model=input;member.lastError=null;member.failureCount=0;member.wakeBackoffUntil=null;}data={status:'updated',memberId,model:input}}
         else if(p.path==='/rooms/'+room.roomId+'/messages'&&p.method==='POST'){const input=JSON.parse(p.body);const seq=room.latestSeq+1;const message={messageId:'m_new_'+seq,roomSeq:seq,author:room.human,isOwn:true,kind:'post',createdAt:new Date().toISOString(),mentions:[],mentionAll:false,replyToMessageId:input.replyToMessageId||null,questionId:null,questionStatus:null,answerMessageId:null,label:'[#'+seq+' 房主 · 人类 · 你]',text:input.text,options:[],full:true,preview:false};messages.push(message);room.latestSeq=seq;data={status:'stored',messageId:message.messageId,roomSeq:seq,timeline:messages.slice(-8)}}
         else if(p.path.includes('/answer')){questions=[];room.pendingQuestions=0;data={status:'answered',answerMessageId:'m_answer',messageId:'m_answer',roomSeq:3}}
         else if(p.path.includes('/receipts'))data={messageId:'m_1',human:null,agents:[{memberId:'m_a',displayName:'提案者',kind:'agent',readAt:new Date().toISOString(),source:'model-context'}]};
@@ -101,6 +106,24 @@ assert.ok(document.querySelector('#room-header').textContent.includes('根会话
 assert.ok(document.querySelector('#room-header').textContent.includes('已就绪'),'room header shows root session readiness');
 assert.ok(document.querySelector('#room-header').textContent.includes('Probe · 模型 A (high)'),'room header shows provider, model and variant');
 assert.ok(document.querySelector('#room-header').textContent.includes('Probe · 模型 B'),'room header shows each member model');
+const failurePill=[...document.querySelectorAll('#room-header .pill.error')].find(element=>element.textContent.includes('模型调用失败'));
+assert.ok(failurePill,'member lastError shows a failure pill');
+assert.ok(failurePill.textContent.includes('×3'),'failure pill shows the failure count');
+assert.equal(failurePill.title,'probe 返回 401：invalid api key','failure pill title carries the full error');
+assert.ok(document.querySelector('#room-header').textContent.includes('退避至'),'member wake backoff is shown');
+assert.ok(document.querySelector('#room-header').textContent.includes('模型同步中'),'unsynced member model is shown');
+assert.ok(document.querySelector('[data-action="change-model"][data-member="'+members[0].memberId+'"]'),'each member chip has a change-model button');
+document.querySelector('[data-action="change-model"][data-member="'+members[0].memberId+'"]').click();
+await waitFor(()=>document.querySelector('#modal').hasAttribute('open')&&document.querySelector('#modal-content .oc-sdk-trigger'),'member model modal');
+chooseSdkOption(document.querySelector('#modal-content'),'模型 B');
+document.querySelector('#modal-content [data-action="submit-member-model"]').click();
+const modelPath='/rooms/'+room.roomId+'/members/'+members[0].memberId+'/model';
+await waitFor(()=>serviceCalls.some(call=>call.path===modelPath&&call.method==='POST'),'member model update');
+const modelCall=serviceCalls.find(call=>call.path===modelPath&&call.method==='POST');
+assert.deepEqual(JSON.parse(modelCall.body),{providerID:'probe',id:'b',name:'模型 B',providerName:'Probe'},'member model update sends the full model object');
+await waitFor(()=>!document.querySelector('#modal').hasAttribute('open'),'member model modal closes');
+await waitFor(()=>hostCalls.some(call=>call.type==='toast'&&call.payload?.message.includes('更换为')),'member model toast');
+await waitFor(()=>[...document.querySelectorAll('#room-header .member-chip')].some(chip=>chip.textContent.includes('提案者')&&chip.textContent.includes('Probe · 模型 B')),'member model refreshed');
 document.querySelector('[data-action="open-workspace"]').click();
 await waitFor(()=>document.querySelectorAll('#file-list .oc-sdk-row').length===2,'SDK workspace file list');
 assert.ok(document.querySelector('#file-list').textContent.includes('a.md'),'file list shows room files');
@@ -150,12 +173,17 @@ chooseSdkOption(document.querySelector('#project-picker'),'另一个项目');
 await waitFor(()=>document.querySelector('#project-picker .oc-sdk-trigger').textContent.includes('另一个项目'),'project switch');
 await waitFor(()=>serviceCalls.some(call=>call.path==='/rooms'&&call.query?.projectDir==='/workspace/other'),'rooms load for switched project');
 await waitFor(()=>document.querySelector('#room-header').textContent.includes('根会话创建失败：模拟根会话失败'),'failed root session shows its error');
+room.status='paused';room.pausedReason='provider-quota';
+window.dispatchEvent(new window.MessageEvent('message',{data:{channel:'openchamber.sdk',v:1,type:'service-event',payload:{topic:'room:changed'}},source:window.parent}));
+await waitFor(()=>document.querySelector('#room-header').textContent.includes('模型额度或余额不足，自动唤醒已暂停。充值或更换模型后点击继续房间。'),'provider quota hint');
+assert.ok([...document.querySelectorAll('#room-header .composer-hint')].some(hint=>hint.classList.contains('provider-quota')&&hint.textContent.includes('模型额度或余额不足')),'provider quota hint is highlighted');
+assert.ok(document.querySelector('[data-action="resume"]'),'provider quota still offers the existing resume action');
 document.querySelector('#new-room').click();
 await waitFor(()=>!document.querySelector('#create-view').hidden,'create view after project switch');
 await waitFor(()=>document.querySelector('#model-source-hint').textContent.includes('其他项目'),'global model fallback hint');
 assert.ok(serviceCalls.some(call=>call.path==='/models'&&call.query?.directory==='/workspace/other'),'models reload for switched project');
 assert.deepEqual(errors,[]);
-console.log('PASS panel DOM smoke: project picker, SDK model picker, create form, role defaults, question answer, composer, receipts modal, global fallback');
+console.log('PASS panel DOM smoke: project picker, SDK model picker, member model change, failure pills, provider quota hint, create form, role defaults, question answer, composer, receipts modal, global fallback');
 window.close();
 store.close();
 rmSync(panelRoot,{recursive:true,force:true});
