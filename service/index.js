@@ -8891,8 +8891,8 @@ var require_emoji_regex = __commonJS({
 // src/service/main.mjs
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdirSync as mkdirSync2, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { basename, isAbsolute, join as join2, resolve, sep } from "node:path";
+import { mkdirSync as mkdirSync2, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { basename, isAbsolute, join as join2, relative, resolve, sep } from "node:path";
 import { tmpdir, userInfo } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -9561,7 +9561,7 @@ var RoomStore = class {
       names.add(key);
       const model = spec.model;
       if (!model || typeof model.providerID !== "string" || typeof model.id !== "string") fail("ROOM_INVALID_INPUT", "Every agent needs a providerID and model id.");
-      return { id: id("m"), role, displayName, model: { providerID: model.providerID, id: model.id, name: model.name || model.id, ...model.variant ? { variant: model.variant } : {} } };
+      return { id: id("m"), role, displayName, model: { providerID: model.providerID, id: model.id, name: model.name || model.id, providerName: model.providerName || model.provider?.name || model.providerID, ...model.variant ? { variant: model.variant } : {} } };
     });
     const roomId = id("r");
     const rootSessionId = `ses_disc_${roomId}_root`;
@@ -11119,7 +11119,7 @@ function createDiscussionService(options = {}) {
     const match = path.match(/^\/rooms\/([^/]+)(?:\/(.*))?$/);
     return match ? { roomId: decodeURIComponent(match[1]), rest: match[2] || "" } : null;
   }
-  function readWorkspace(roomId, requested) {
+  function resolveWorkspacePath(roomId, requested) {
     const room = store.room(roomId);
     if (typeof requested !== "string" || !isAbsolute(requested) || requested.includes("\0")) throw new RoomError("ROOM_BAD_PATH", "Use an absolute path inside this room's temporary directory.", {}, 400);
     const base = realpathSync(room.workspace_dir);
@@ -11127,9 +11127,44 @@ function createDiscussionService(options = {}) {
     try {
       target = realpathSync(requested);
     } catch {
-      throw new RoomError("ROOM_FILE_NOT_FOUND", "The discussion file does not exist.", {}, 404);
+      throw new RoomError("ROOM_FILE_NOT_FOUND", "The discussion path does not exist.", {}, 404);
     }
     if (target !== base && !target.startsWith(base + sep)) throw new RoomError("ROOM_BAD_PATH", "The path leaves this room's temporary directory.", {}, 403);
+    return { base, target };
+  }
+  function listWorkspace(roomId, requested) {
+    const { base, target } = resolveWorkspacePath(roomId, requested);
+    const info = statSync(target);
+    if (!info.isDirectory()) throw new RoomError("ROOM_BAD_PATH", "Only discussion directories can be listed.", {}, 400);
+    const entries = [];
+    for (const entry of readdirSync(target, { withFileTypes: true })) {
+      let path;
+      try {
+        path = realpathSync(join2(target, entry.name));
+      } catch {
+        continue;
+      }
+      if (path !== base && !path.startsWith(base + sep)) continue;
+      const stat = statSync(path);
+      if (!stat.isDirectory() && !stat.isFile()) continue;
+      entries.push({
+        name: entry.name,
+        path,
+        relativePath: relative(base, path),
+        kind: stat.isDirectory() ? "directory" : "file",
+        size: stat.isFile() ? stat.size : null,
+        mtime: stat.mtime.toISOString()
+      });
+    }
+    entries.sort((a, b) => a.kind !== b.kind ? a.kind === "directory" ? -1 : 1 : a.name.localeCompare(b.name, "zh-CN"));
+    return {
+      path: target,
+      parentPath: target === base ? null : resolve(target, ".."),
+      entries
+    };
+  }
+  function readWorkspace(roomId, requested) {
+    const { target } = resolveWorkspacePath(roomId, requested);
     const info = statSync(target);
     if (!info.isFile()) throw new RoomError("ROOM_BAD_PATH", "Only regular files can be previewed.", {}, 400);
     if (info.size > 2 * 1024 * 1024) throw new RoomError("ROOM_FILE_TOO_LARGE", "The preview limit is 2 MB.", {}, 413);
@@ -11200,6 +11235,11 @@ function createDiscussionService(options = {}) {
       const input = await body(req);
       const name = input.humanName || defaultHumanName();
       return json2(res, 200, engine.createRoom({ ...input, humanName: name, tempRoot }));
+    }
+    if (req.method === "POST" && url.pathname === "/workspace/list") {
+      const input = await body(req);
+      const room = store.room(input.roomId);
+      return json2(res, 200, listWorkspace(input.roomId, input.path || room.workspace_dir));
     }
     if (req.method === "POST" && url.pathname === "/workspace/read") {
       const input = await body(req);

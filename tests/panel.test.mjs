@@ -18,7 +18,7 @@ const virtualConsole=new VirtualConsole();virtualConsole.on('jsdomError',e=>erro
 let dom;
 const panelRoot=mkdtempSync('/tmp/opencode/room-panel-');
 const store=new RoomStore();
-const created=store.createRoom({projectDir:panelRoot,tempRoot:panelRoot,title:'测试讨论',members:[{role:'proposer',displayName:'提案者',model:{providerID:'probe',id:'a'}},{role:'reviewer',displayName:'审查者',model:{providerID:'probe',id:'b'}}]});
+const created=store.createRoom({projectDir:panelRoot,tempRoot:panelRoot,title:'测试讨论',members:[{role:'proposer',displayName:'提案者',model:{providerID:'probe',id:'a',name:'模型 A',providerName:'Probe',variant:'high'}},{role:'reviewer',displayName:'审查者',model:{providerID:'probe',id:'b',name:'模型 B',providerName:'Probe'}}]});
 store.db.prepare("UPDATE members SET creation_status='ready' WHERE room_id=? AND kind='agent'").run(created.roomId);
 store.db.prepare("UPDATE rooms SET status='ready', root_creation_status='ready' WHERE id=?").run(created.roomId);
 store.post(created.roomId,{kind:'human',memberId:created.human.memberId},{text:'第一条消息'});
@@ -65,6 +65,7 @@ dom=new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html'
         else if(p.path.includes('/answer')){questions=[];room.pendingQuestions=0;data={status:'answered',answerMessageId:'m_answer',messageId:'m_answer',roomSeq:3}}
         else if(p.path.includes('/receipts'))data={messageId:'m_1',human:null,agents:[{memberId:'m_a',displayName:'提案者',kind:'agent',readAt:new Date().toISOString(),source:'model-context'}]};
         else if(p.path==='/rooms/'+room.roomId+'/read')data={marked:1,unread:{unreadCount:0,unreadMentionCount:0,unreadMentions:[]}};
+        else if(p.path==='/workspace/list')data={path:room.workspaceDir,parentPath:null,entries:[{name:'review',path:room.workspaceDir+'/review',relativePath:'review',kind:'directory',size:null,mtime:new Date().toISOString()},{name:'a.md',path:room.workspaceDir+'/a.md',relativePath:'a.md',kind:'file',size:6,mtime:new Date().toISOString()}]};
         else if(p.path==='/workspace/read')data={path:'/tmp/opencode/Discussions/r_demo/a.md',content:'# 文档'};
         response({id:message.id},{status:200,body:JSON.stringify(data)});return}
       response({id:message.id},{ok:true});
@@ -82,7 +83,7 @@ dom=new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html'
   window.confirm=()=>true;window.prompt=()=> '';
 }});
 const window=dom.window;const document=window.document;
-async function waitFor(fn,label){for(let i=0;i<100;i++){if(fn())return;await new Promise(r=>setTimeout(r,20));}throw new Error('Timeout '+label+'; errors='+errors.join('\n')+'; project='+document.querySelector('#project-picker')?.textContent+'; questions='+document.querySelector('#question-list')?.textContent+'; error='+document.querySelector('#error')?.textContent)}
+async function waitFor(fn,label){for(let i=0;i<100;i++){if(fn())return;await new Promise(r=>setTimeout(r,20));}throw new Error('Timeout '+label+'; errors='+errors.join('\n')+'; project='+document.querySelector('#project-picker')?.textContent+'; file='+document.querySelector('#file-list')?.textContent+'; modal='+document.querySelector('#modal-content')?.textContent+'; error='+document.querySelector('#error')?.textContent)}
 function chooseSdkOption(root,labelPart){
   const trigger=root.querySelector('.oc-sdk-trigger');
   trigger.click();
@@ -90,9 +91,24 @@ function chooseSdkOption(root,labelPart){
   if(!option)throw new Error('Missing SDK option '+labelPart+' in '+root.textContent);
   option.click();
 }
+function chooseListOption(root,labelPart){
+  const option=[...root.querySelectorAll('.oc-sdk-row')].find(item=>item.textContent.includes(labelPart));
+  if(!option)throw new Error('Missing list option '+labelPart+' in '+root.textContent);
+  option.click();
+}
 await waitFor(()=>document.querySelector('#room-header').textContent.includes('测试讨论'),'room header');
 assert.ok(document.querySelector('#room-header').textContent.includes('根会话'),'room header shows root session');
 assert.ok(document.querySelector('#room-header').textContent.includes('已就绪'),'room header shows root session readiness');
+assert.ok(document.querySelector('#room-header').textContent.includes('Probe · 模型 A (high)'),'room header shows provider, model and variant');
+assert.ok(document.querySelector('#room-header').textContent.includes('Probe · 模型 B'),'room header shows each member model');
+document.querySelector('[data-action="open-workspace"]').click();
+await waitFor(()=>document.querySelectorAll('#file-list .oc-sdk-row').length===2,'SDK workspace file list');
+assert.ok(document.querySelector('#file-list').textContent.includes('a.md'),'file list shows room files');
+assert.ok(document.querySelector('#file-list').textContent.includes('review'),'file list shows room directories');
+chooseListOption(document.querySelector('#file-list'),'a.md');
+await waitFor(()=>document.querySelector('#file-preview-content').textContent.includes('# 文档'),'SDK text file preview');
+assert.ok(serviceCalls.some(call=>call.path==='/workspace/list'),'workspace list endpoint is used');
+document.querySelector('[data-action="close-modal"]').click();
 const rootSessionButton=document.querySelector('[data-action="open-root-session"]');
 assert.ok(rootSessionButton,'root session button is present');
 assert.equal(rootSessionButton.dataset.session,room.rootSessionId);

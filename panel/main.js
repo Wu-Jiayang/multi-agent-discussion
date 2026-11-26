@@ -2037,6 +2037,54 @@ ${GUEST_UI_LOOK_CSS}`;
     };
   };
 
+  // node_modules/@openchamber/sdk/dist/ui/button.js
+  var ring = () => {
+    const spinner = document.createElement("span");
+    spinner.className = "oc-sdk-spinner-ring";
+    spinner.setAttribute("aria-hidden", "true");
+    return spinner;
+  };
+  var mountButton = (root, initial) => {
+    ensureStyle(UI_CSS);
+    let props = initial;
+    const node = button("oc-sdk oc-sdk-btn");
+    const spinner = ring();
+    const label = document.createElement("span");
+    node.append(label);
+    root.append(node);
+    const paint = () => {
+      node.dataset.variant = props.variant ?? "default";
+      node.dataset.size = props.size ?? "default";
+      node.disabled = Boolean(props.disabled) || Boolean(props.loading);
+      node.dataset.loading = props.loading ? "true" : "false";
+      node.setAttribute("aria-busy", props.loading ? "true" : "false");
+      if (props.loading && spinner.parentNode !== node) {
+        node.prepend(spinner);
+      } else if (!props.loading && spinner.parentNode === node) {
+        spinner.remove();
+      }
+      setText(label, props.label);
+    };
+    const onClick = () => {
+      if (props.disabled || props.loading) {
+        return;
+      }
+      props.onClick();
+    };
+    node.addEventListener("click", onClick);
+    paint();
+    return {
+      update: (next) => {
+        props = { ...props, ...next };
+        paint();
+      },
+      dispose: () => {
+        node.removeEventListener("click", onClick);
+        node.remove();
+      }
+    };
+  };
+
   // node_modules/@openchamber/sdk/dist/ui/icons.js
   var SVG_NS = "http://www.w3.org/2000/svg";
   var ICON_PATH = {
@@ -2061,6 +2109,67 @@ ${GUEST_UI_LOOK_CSS}`;
     path.setAttribute("d", ICON_PATH[name]);
     node.append(path);
     return node;
+  };
+
+  // node_modules/@openchamber/sdk/dist/ui/search.js
+  var mountSearchField = (root, initial) => {
+    ensureStyle(UI_CSS);
+    let props = initial;
+    const wrap = el("div", "oc-sdk oc-sdk-search");
+    const input = el("input", "oc-sdk-input");
+    input.type = "text";
+    input.spellcheck = false;
+    input.autocomplete = "off";
+    input.setAttribute("role", "searchbox");
+    const clear = button("oc-sdk-search-clear");
+    clear.append(icon("close", 14));
+    clear.tabIndex = -1;
+    wrap.append(icon("search", 16, "oc-sdk-search-icon"), input, clear);
+    root.append(wrap);
+    const paint = () => {
+      const placeholder = props.placeholder ?? "Search";
+      setAttr(input, "placeholder", placeholder);
+      input.setAttribute("aria-label", props.label ?? placeholder);
+      clear.setAttribute("aria-label", "Clear search");
+      if (input.value !== props.value) {
+        input.value = props.value;
+      }
+      wrap.dataset.active = props.value.trim() === "" ? "false" : "true";
+    };
+    const clearValue = () => {
+      if (props.value !== "") {
+        props.onChange("");
+      }
+      input.focus();
+    };
+    const onInput = () => {
+      props.onChange(input.value);
+    };
+    const onKeyDown = (event) => {
+      if (event.key === "Escape" && input.value !== "") {
+        event.preventDefault();
+        clearValue();
+      }
+    };
+    input.addEventListener("input", onInput);
+    input.addEventListener("keydown", onKeyDown);
+    clear.addEventListener("click", clearValue);
+    paint();
+    if (props.autofocus) {
+      input.focus();
+    }
+    return {
+      update: (next) => {
+        props = { ...props, ...next };
+        paint();
+      },
+      dispose: () => {
+        input.removeEventListener("input", onInput);
+        input.removeEventListener("keydown", onKeyDown);
+        clear.removeEventListener("click", clearValue);
+        wrap.remove();
+      }
+    };
   };
 
   // node_modules/@openchamber/sdk/dist/ui/navigation.js
@@ -2334,6 +2443,299 @@ ${GUEST_UI_LOOK_CSS}`;
     };
   };
 
+  // node_modules/@openchamber/sdk/dist/ui/badge.js
+  var applyTone = (node, tone2) => {
+    setAttr(node, "data-tone", tone2 && tone2 !== "neutral" ? tone2 : null);
+  };
+
+  // node_modules/@openchamber/sdk/dist/ui/list.js
+  var listCount = 0;
+  var mountList = (root, initial) => {
+    ensureStyle(UI_CSS);
+    let props = initial;
+    const uid = `oc-sdk-list-${listCount += 1}`;
+    const list = el("div", "oc-sdk oc-sdk-list");
+    list.setAttribute("role", "listbox");
+    list.tabIndex = 0;
+    root.append(list);
+    let activeId = null;
+    const rowId = (id) => `${uid}-${id}`;
+    const setActive = (id) => {
+      activeId = id;
+      for (const row of Array.from(list.children)) {
+        if (row instanceof HTMLElement) {
+          row.dataset.active = row.id === rowId(id ?? "") ? "true" : "false";
+        }
+      }
+      setAttr(list, "aria-activedescendant", id ? rowId(id) : null);
+      list.querySelector('[data-active="true"]')?.scrollIntoView({ block: "nearest" });
+    };
+    const span = (className, text) => {
+      const node = el("span", className);
+      node.textContent = text;
+      return node;
+    };
+    const paint = () => {
+      clearNode(list);
+      setAttr(list, "aria-label", props.ariaLabel);
+      if (props.items.length === 0) {
+        list.append(span("oc-sdk-list-empty", props.emptyText ?? "Nothing here"));
+        setActive(null);
+        return;
+      }
+      for (const item of props.items) {
+        const row = button("oc-sdk-row");
+        row.id = rowId(item.id);
+        row.setAttribute("role", "option");
+        row.setAttribute("aria-selected", item.id === props.selectedId ? "true" : "false");
+        row.disabled = Boolean(item.disabled);
+        row.tabIndex = -1;
+        if (item.leading)
+          row.append(span("oc-sdk-row-lead", item.leading));
+        const main = el("span", "oc-sdk-row-main");
+        main.append(span("oc-sdk-row-title", item.title));
+        if (item.subtitle)
+          main.append(span("oc-sdk-row-sub", item.subtitle));
+        row.append(main);
+        if (item.badge) {
+          const badge = span("oc-sdk-badge", item.badge.label);
+          applyTone(badge, item.badge.tone);
+          row.append(badge);
+        }
+        if (item.meta)
+          row.append(span("oc-sdk-row-meta", item.meta));
+        row.addEventListener("click", () => props.onSelect(item.id));
+        list.append(row);
+      }
+      const stillThere = props.items.some((item) => item.id === activeId && !item.disabled);
+      setActive(stillThere ? activeId : props.selectedId ?? null);
+    };
+    const onKeyDown = (event) => {
+      const step = navigationKey(event);
+      if (step) {
+        event.preventDefault();
+        setActive(moveListSelection(props.items, activeId, step));
+        return;
+      }
+      if ((event.key === "Enter" || event.key === " ") && activeId) {
+        event.preventDefault();
+        props.onSelect(activeId);
+      }
+    };
+    list.addEventListener("keydown", onKeyDown);
+    paint();
+    return {
+      update: (next) => {
+        props = { ...props, ...next };
+        paint();
+      },
+      dispose: () => {
+        list.removeEventListener("keydown", onKeyDown);
+        list.remove();
+      }
+    };
+  };
+
+  // node_modules/@openchamber/sdk/dist/ui/empty.js
+  var mountEmpty = (root, initial) => {
+    ensureStyle(UI_CSS);
+    let props = initial;
+    const shell = el("div", "oc-sdk oc-sdk-empty");
+    const title = el("h2", "oc-sdk-empty-title");
+    const body = el("p", "oc-sdk-empty-body");
+    const slot = el("div", "oc-sdk-empty-action");
+    shell.append(title, body, slot);
+    root.append(shell);
+    let action = null;
+    const paint = () => {
+      setText(title, props.title);
+      setText(body, props.body);
+      body.hidden = !props.body;
+      slot.hidden = !props.action;
+      if (!props.action) {
+        action?.dispose();
+        action = null;
+        return;
+      }
+      const next = { label: props.action.label, onClick: props.action.onClick };
+      if (action) {
+        action.update(next);
+      } else {
+        action = mountButton(slot, { ...next, variant: "outline", size: "sm" });
+      }
+    };
+    paint();
+    return {
+      update: (next) => {
+        props = { ...props, ...next };
+        paint();
+      },
+      dispose: () => {
+        action?.dispose();
+        action = null;
+        shell.remove();
+      }
+    };
+  };
+
+  // node_modules/@openchamber/sdk/dist/ui/spinner.js
+  var mountSpinner = (root, initial = {}) => {
+    ensureStyle(UI_CSS);
+    let props = initial;
+    const node = el("span", "oc-sdk oc-sdk-spinner");
+    node.setAttribute("role", "status");
+    const ring2 = el("span", "oc-sdk-spinner-ring");
+    ring2.setAttribute("aria-hidden", "true");
+    const label = el("span");
+    node.append(ring2, label);
+    root.append(node);
+    const paint = () => {
+      node.dataset.size = props.size ?? "default";
+      setText(label, props.label);
+      label.hidden = !props.label;
+      node.setAttribute("aria-label", props.label ?? "Loading");
+    };
+    paint();
+    return {
+      update: (next) => {
+        props = { ...props, ...next };
+        paint();
+      },
+      dispose: () => {
+        node.remove();
+      }
+    };
+  };
+
+  // node_modules/@openchamber/sdk/dist/ui/banner.js
+  var mountBanner = (root, initial) => {
+    ensureStyle(UI_CSS);
+    let props = initial;
+    const node = el("div", "oc-sdk oc-sdk-banner");
+    const text = el("div", "oc-sdk-banner-text");
+    const title = el("div", "oc-sdk-banner-title");
+    const body = el("div", "oc-sdk-banner-body");
+    const slot = el("div", "oc-sdk-banner-action");
+    text.append(title, body);
+    node.append(text, slot);
+    root.append(node);
+    let action = null;
+    const paint = () => {
+      node.dataset.tone = props.tone;
+      node.setAttribute("role", props.tone === "error" || props.tone === "warning" ? "alert" : "status");
+      setText(title, props.title);
+      setText(body, props.body);
+      body.hidden = !props.body;
+      slot.hidden = !props.action;
+      if (!props.action) {
+        action?.dispose();
+        action = null;
+        return;
+      }
+      const next = { label: props.action.label, onClick: props.action.onClick };
+      if (action) {
+        action.update(next);
+      } else {
+        action = mountButton(slot, { ...next, variant: "outline", size: "xs" });
+      }
+    };
+    paint();
+    return {
+      update: (next) => {
+        props = { ...props, ...next };
+        paint();
+      },
+      dispose: () => {
+        action?.dispose();
+        action = null;
+        node.remove();
+      }
+    };
+  };
+
+  // node_modules/@openchamber/sdk/dist/ui/text.js
+  var MARKDOWN_TOKEN = /(!?)\[([^[\]]*)\]\((https?:\/\/[^()\s]+)\)/g;
+  var isHttpUrl = (value) => {
+    try {
+      const url = new URL(value);
+      return url.protocol === "http:" || url.protocol === "https:";
+    } catch {
+      return false;
+    }
+  };
+  var splitTextMedia = (text) => {
+    const parts = [];
+    let last = 0;
+    for (const match of text.matchAll(MARKDOWN_TOKEN)) {
+      const index = match.index ?? 0;
+      if (index > last) {
+        parts.push({ kind: "text", text: text.slice(last, index) });
+      }
+      const marker = match[1] ?? "";
+      const label = (match[2] ?? "").trim();
+      const href = match[3] ?? "";
+      if (!isHttpUrl(href)) {
+        parts.push({ kind: "text", text: match[0] });
+      } else if (marker === "!") {
+        parts.push({ kind: "image", src: href, alt: label });
+      } else {
+        parts.push({ kind: "link", href, label: label || href });
+      }
+      last = index + match[0].length;
+    }
+    if (last < text.length) {
+      parts.push({ kind: "text", text: text.slice(last) });
+    }
+    return parts;
+  };
+  var mountText = (root, initial) => {
+    ensureStyle(UI_CSS);
+    let props = initial;
+    const node = el("div", "oc-sdk oc-sdk-text");
+    root.append(node);
+    const onClick = (event) => {
+      if (!(event.target instanceof HTMLAnchorElement) || !props.onOpenUrl) {
+        return;
+      }
+      event.preventDefault();
+      props.onOpenUrl(event.target.href);
+    };
+    const paint = () => {
+      clearNode(node);
+      for (const part of splitTextMedia(props.text)) {
+        if (part.kind === "text") {
+          node.append(document.createTextNode(part.text));
+        } else if (part.kind === "link") {
+          const link = el("a");
+          link.href = part.href;
+          link.rel = "noopener noreferrer";
+          link.target = "_blank";
+          link.textContent = part.label;
+          node.append(link);
+        } else {
+          const img = el("img");
+          img.src = part.src;
+          img.alt = part.alt;
+          img.loading = "lazy";
+          img.referrerPolicy = "no-referrer";
+          node.append(img);
+        }
+      }
+    };
+    node.addEventListener("click", onClick);
+    paint();
+    return {
+      update: (next) => {
+        props = { ...props, ...next };
+        paint();
+      },
+      dispose: () => {
+        node.removeEventListener("click", onClick);
+        node.remove();
+      }
+    };
+  };
+
   // src/panel/main.mjs
   var host = connectHost();
   var $ = (selector) => document.querySelector(selector);
@@ -2565,6 +2967,23 @@ ${GUEST_UI_LOOK_CSS}`;
   }
   function modelKey(model) {
     return model ? JSON.stringify([model.providerID, model.id, model.variant || ""]) : "";
+  }
+  function memberModelInfo(member) {
+    const model = member?.model;
+    if (!model?.providerID || !model?.id) return null;
+    const exact = state.models.find((item) => item.providerID === model.providerID && item.id === model.id && (item.variant || "") === (model.variant || ""));
+    const catalog = exact || state.models.find((item) => item.providerID === model.providerID && item.id === model.id);
+    return {
+      provider: catalog?.providerName || model.providerName || model.providerID,
+      name: catalog?.name || model.name || model.id,
+      variant: model.variant || ""
+    };
+  }
+  function memberModelPill(member) {
+    const info = memberModelInfo(member);
+    if (!info) return "";
+    const label = `${info.provider} \xB7 ${info.name}${info.variant ? ` (${info.variant})` : ""}`;
+    return `<span class="pill model" title="${escape(label)}">${escape(label)}</span>`;
   }
   function modelSelectOptions() {
     return state.models.map((model) => ({
@@ -2854,8 +3273,9 @@ ${GUEST_UI_LOOK_CSS}`;
     const rootPill = rootStatus === "ready" ? "running" : rootStatus === "failed" ? "unknown" : "waiting-human";
     const rootChip = rootStatus || room.rootSessionId ? `<span class="member-chip root-session"><span>\u6839\u4F1A\u8BDD</span>${rootStatus ? `<span class="pill ${rootPill}">${escape(rootStatusLabels[rootStatus] || rootStatus)}</span>` : ""}${room.rootSessionId ? `<button data-action="open-root-session" data-session="${escape(room.rootSessionId)}">\u4F1A\u8BDD\u7EC4</button>` : ""}</span>` : "";
     $("#room-header").innerHTML = `
-    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">\u4EBA\u7C7B \xB7 \u623F\u4E3B</span></span>${room.members.map((member) => `<span class="member-chip"><span>${escape(member.displayName)}</span>${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">\u521B\u5EFA\u5931\u8D25\uFF1A${escape(member.creationError || "\u672A\u77E5\u539F\u56E0")}</span>` : member.taskError ? `<span class="pill waiting-human">\u6307\u4EE4\u540C\u6B65\u5931\u8D25\uFF1A${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">\u4F1A\u8BDD</button>` : ""}</span>`).join("")}</div></div>
+    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">\u4EBA\u7C7B \xB7 \u623F\u4E3B</span></span>${room.members.map((member) => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">\u521B\u5EFA\u5931\u8D25\uFF1A${escape(member.creationError || "\u672A\u77E5\u539F\u56E0")}</span>` : member.taskError ? `<span class="pill waiting-human">\u6307\u4EE4\u540C\u6B65\u5931\u8D25\uFF1A${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">\u4F1A\u8BDD</button>` : ""}</span>`).join("")}</div></div>
     <div class="room-controls">
+      <button class="button ghost" data-action="open-workspace">\u6587\u4EF6</button>
       <span class="pill budget">\u4F59\u989D ${room.budget.remaining}/${room.budget.limit} \xB7 \u7B2C ${room.budget.period} \u6BB5</span>
       ${room.status === "creating" ? `<button class="button secondary" data-action="retry">\u91CD\u8BD5\u7F3A\u5931\u4F1A\u8BDD</button>` : room.status !== "ended" ? `${paused ? `<button class="button primary" data-action="resume">\u7EE7\u7EED\u623F\u95F4</button>` : `<button class="button secondary" data-action="pause">\u6682\u505C\u5524\u9192</button>`}<button class="button ghost danger" data-action="end">\u7ED3\u675F\u623F\u95F4</button>` : ""}
     </div>
@@ -3091,17 +3511,211 @@ ${GUEST_UI_LOOK_CSS}`;
     await loadTimeline(false, null, messageId);
     persistView();
   }
+  var modalSdkHandles = /* @__PURE__ */ new Map();
+  var fileBrowser = null;
+  function disposeModalSdk() {
+    for (const handle of modalSdkHandles.values()) handle.dispose();
+    modalSdkHandles.clear();
+  }
+  function clearModalRoot(root) {
+    modalSdkHandles.get(root)?.dispose();
+    modalSdkHandles.delete(root);
+    root.replaceChildren();
+  }
+  function mountModalRoot(root, mount) {
+    if (!root || typeof root.append !== "function") throw new Error(`Invalid SDK mount root: ${root?.constructor?.name || String(root)}`);
+    clearModalRoot(root);
+    const handle = mount(root);
+    modalSdkHandles.set(root, handle);
+    return handle;
+  }
+  function formatBytes(value) {
+    if (!Number.isFinite(value)) return "";
+    if (value < 1024) return `${value} B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  function parentDirectory(path) {
+    const at = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    return at > 0 ? path.slice(0, at) : path;
+  }
+  function fileName(path) {
+    const at = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    return path.slice(at + 1);
+  }
+  function textPreviewable(path) {
+    return /\.(md|markdown|txt|log|csv)$/i.test(path);
+  }
   function showModal(title, content) {
+    disposeModalSdk();
+    fileBrowser = null;
     $("#modal-content").innerHTML = `<h2>${escape(title)}</h2>${content}<div class="modal-actions"><button class="button secondary" data-action="close-modal">\u5173\u95ED</button></div>`;
+    $("#modal").classList.remove("file-browser-dialog");
     $("#modal").showModal();
   }
-  async function openFile(path) {
-    try {
-      const file = await request("POST", "/workspace/read", { roomId: state.roomId, path });
-      showModal(file.path, `<pre>${escape(file.content)}</pre>`);
-    } catch (error) {
-      showError(error);
+  function renderWorkspaceBreadcrumb() {
+    if (!fileBrowser?.data) return;
+    const root = fileBrowser.rootPath;
+    const current = fileBrowser.data.path;
+    const relativePath = current === root ? "" : current.slice(root.length).replace(/^[\\/]+/, "");
+    const parts = relativePath ? relativePath.split(/[\\/]+/) : [];
+    let path = root;
+    const items = [{ label: "\u623F\u95F4\u6587\u4EF6", path: root }];
+    for (const part of parts) {
+      path = `${path.replace(/\/$/, "")}/${part}`;
+      items.push({ label: part, path });
     }
+    $("#file-breadcrumb").innerHTML = items.map((item, index) => `${index ? '<span class="breadcrumb-sep">/</span>' : ""}<button class="button ghost" data-action="file-dir" data-path="${escape(item.path)}">${escape(item.label)}</button>`).join("");
+  }
+  function updateWorkspaceToolbar() {
+    const up = modalSdkHandles.get($("#file-up"));
+    up?.update({ disabled: !fileBrowser?.data?.parentPath });
+  }
+  function renderWorkspaceToolbar() {
+    mountModalRoot($("#file-search"), (target) => mountSearchField(target, {
+      value: fileBrowser.query,
+      placeholder: "\u641C\u7D22\u5F53\u524D\u76EE\u5F55\u6587\u4EF6",
+      label: "\u641C\u7D22\u623F\u95F4\u6587\u4EF6",
+      onChange: (value) => {
+        fileBrowser.query = value;
+        renderWorkspaceList();
+      }
+    }));
+    mountModalRoot($("#file-refresh"), (target) => mountButton(target, {
+      label: "\u5237\u65B0",
+      variant: "outline",
+      size: "sm",
+      onClick: () => void loadWorkspaceDirectory(fileBrowser.path || fileBrowser.rootPath)
+    }));
+    mountModalRoot($("#file-up"), (target) => mountButton(target, {
+      label: "\u4E0A\u4E00\u7EA7",
+      variant: "outline",
+      size: "sm",
+      disabled: true,
+      onClick: () => fileBrowser.data?.parentPath && void loadWorkspaceDirectory(fileBrowser.data.parentPath)
+    }));
+    updateWorkspaceToolbar();
+  }
+  function renderWorkspaceList() {
+    if (!fileBrowser?.data) return;
+    const root = $("#file-list");
+    const query = fileBrowser.query.trim().toLowerCase();
+    const entries = fileBrowser.data.entries.filter((entry) => !query || entry.name.toLowerCase().includes(query) || entry.relativePath.toLowerCase().includes(query));
+    if (!entries.length) {
+      mountModalRoot(root, (target) => mountEmpty(target, { title: query ? "\u6CA1\u6709\u5339\u914D\u7684\u6587\u4EF6" : "\u8FD9\u4E2A\u76EE\u5F55\u662F\u7A7A\u7684", body: query ? "\u6362\u4E2A\u5173\u952E\u8BCD\u8BD5\u8BD5\u3002" : "Agent \u5199\u5165\u7684\u8BA8\u8BBA\u6587\u6863\u4F1A\u663E\u793A\u5728\u8FD9\u91CC\u3002" }));
+      return;
+    }
+    const byId = new Map(entries.map((entry) => [encodeURIComponent(entry.relativePath), entry]));
+    const selectedEntry = fileBrowser.selectedPath ? fileBrowser.data.entries.find((entry) => entry.path === fileBrowser.selectedPath) : null;
+    mountModalRoot(root, (target) => mountList(target, {
+      items: [...byId].map(([id, entry]) => ({
+        id,
+        title: entry.name,
+        subtitle: entry.relativePath,
+        leading: entry.kind === "directory" ? "\u25B8" : "\xB7",
+        meta: entry.kind === "file" ? formatBytes(entry.size) : "\u76EE\u5F55"
+      })),
+      selectedId: selectedEntry ? encodeURIComponent(selectedEntry.relativePath) : null,
+      emptyText: "\u6CA1\u6709\u6587\u4EF6",
+      ariaLabel: "\u623F\u95F4\u6587\u4EF6\u5217\u8868",
+      onSelect: (id) => {
+        const entry = byId.get(id);
+        if (!entry) return;
+        if (entry.kind === "directory") void loadWorkspaceDirectory(entry.path);
+        else queueMicrotask(() => void previewWorkspacePath(entry.path));
+      }
+    }));
+  }
+  async function loadWorkspaceDirectory(path, previewPath = null) {
+    if (!fileBrowser || !state.roomId) return;
+    const roomId = state.roomId;
+    const generation = ++fileBrowser.generation;
+    fileBrowser.path = path;
+    mountModalRoot($("#file-list"), (target) => mountSpinner(target, { label: "\u6B63\u5728\u8BFB\u53D6\u76EE\u5F55\u2026" }));
+    try {
+      const data = await request("POST", "/workspace/list", { roomId, path });
+      if (!fileBrowser || fileBrowser.roomId !== roomId || fileBrowser.generation !== generation) return;
+      fileBrowser.data = data;
+      fileBrowser.path = data.path;
+      renderWorkspaceBreadcrumb();
+      updateWorkspaceToolbar();
+      renderWorkspaceList();
+      if (previewPath) void previewWorkspacePath(previewPath);
+    } catch (error) {
+      if (!fileBrowser || fileBrowser.roomId !== roomId || fileBrowser.generation !== generation) return;
+      mountModalRoot($("#file-list"), (target) => mountBanner(target, {
+        tone: "error",
+        title: "\u65E0\u6CD5\u8BFB\u53D6\u76EE\u5F55",
+        body: error.message,
+        action: { label: "\u91CD\u8BD5", onClick: () => void loadWorkspaceDirectory(path, previewPath) }
+      }));
+    }
+  }
+  async function previewWorkspacePath(path) {
+    if (!fileBrowser || !state.roomId) return;
+    const roomId = state.roomId;
+    const generation = fileBrowser.generation;
+    fileBrowser.selectedPath = path;
+    renderWorkspaceList();
+    $("#file-preview-title").textContent = fileName(path);
+    $("#file-preview-title").title = path;
+    const root = $("#file-preview-content");
+    mountModalRoot(root, (target) => mountSpinner(target, { label: "\u6B63\u5728\u8BFB\u53D6\u6587\u4EF6\u2026" }));
+    try {
+      const file = await request("POST", "/workspace/read", { roomId, path });
+      if (!fileBrowser || fileBrowser.roomId !== roomId || fileBrowser.generation !== generation) return;
+      if (!file.content) {
+        mountModalRoot(root, (target) => mountEmpty(target, { title: "\u6587\u4EF6\u4E3A\u7A7A", body: file.path }));
+      } else if (textPreviewable(file.path)) {
+        mountModalRoot(root, (target) => mountText(target, { text: file.content, onOpenUrl: (url) => void host.openUrl(url) }));
+      } else {
+        clearModalRoot(root);
+        const pre = document.createElement("pre");
+        pre.textContent = file.content;
+        root.append(pre);
+      }
+    } catch (error) {
+      if (!fileBrowser || fileBrowser.roomId !== roomId || fileBrowser.generation !== generation) return;
+      mountModalRoot(root, (target) => mountBanner(target, {
+        tone: "error",
+        title: "\u65E0\u6CD5\u9884\u89C8\u6587\u4EF6",
+        body: error.message,
+        action: { label: "\u91CD\u8BD5", onClick: () => void previewWorkspacePath(path) }
+      }));
+    }
+  }
+  async function openWorkspaceBrowser(previewPath = null) {
+    if (!state.roomId || !state.room?.workspaceDir) return showError(new Error("\u5F53\u524D\u623F\u95F4\u6CA1\u6709\u53EF\u6D4F\u89C8\u7684\u4E34\u65F6\u76EE\u5F55\u3002"));
+    disposeModalSdk();
+    const roomId = state.roomId;
+    fileBrowser = {
+      roomId,
+      rootPath: state.room.workspaceDir,
+      path: state.room.workspaceDir,
+      data: null,
+      entries: [],
+      query: "",
+      selectedPath: previewPath,
+      generation: 0
+    };
+    $("#modal-content").innerHTML = `
+    <h2>\u623F\u95F4\u6587\u4EF6</h2>
+    <div class="file-browser">
+      <div class="file-browser-toolbar">
+        <div id="file-breadcrumb" class="file-breadcrumb"></div>
+        <div id="file-search" class="file-search"></div>
+        <div class="file-toolbar-actions"><div id="file-up"></div><div id="file-refresh"></div></div>
+      </div>
+      <div class="file-browser-body">
+        <div id="file-list" class="file-list"></div>
+        <section class="file-preview"><div id="file-preview-title" class="file-preview-title">\u9009\u62E9\u4E00\u4E2A\u6587\u4EF6</div><div id="file-preview-content" class="file-preview-content"></div></section>
+      </div>
+    </div>
+    <div class="modal-actions"><button class="button secondary" data-action="close-modal">\u5173\u95ED</button></div>`;
+    $("#modal").classList.add("file-browser-dialog");
+    $("#modal").showModal();
+    renderWorkspaceToolbar();
+    await loadWorkspaceDirectory(previewPath ? parentDirectory(previewPath) : fileBrowser.rootPath, previewPath);
   }
   async function showReceipts(messageId) {
     const receipts = await request("GET", `/rooms/${encodeURIComponent(state.roomId)}/messages/${encodeURIComponent(messageId)}/receipts`);
@@ -3254,8 +3868,12 @@ ${GUEST_UI_LOOK_CSS}`;
       toast("\u5DF2\u590D\u5236\u7A33\u5B9A\u5B9A\u4F4D\u4FE1\u606F\u3002", "success");
       return;
     }
+    if (action === "open-workspace") {
+      await openWorkspaceBrowser();
+      return;
+    }
     if (action === "open-file") {
-      await openFile(button2.dataset.path);
+      await openWorkspaceBrowser(button2.dataset.path);
       return;
     }
     if (action === "more-questions") {
@@ -3379,8 +3997,23 @@ ${GUEST_UI_LOOK_CSS}`;
     state.questionScroll = $("#question-list").scrollTop;
     persistViewSoon();
   });
-  $("#modal").addEventListener("click", (event) => {
-    if (event.target === $("#modal")) $("#modal").close();
+  $("#modal").addEventListener("click", async (event) => {
+    if (event.target === $("#modal")) {
+      $("#modal").close();
+      return;
+    }
+    const button2 = event.target.closest("[data-action]");
+    if (button2?.dataset.action === "close-modal") {
+      $("#modal").close();
+      return;
+    }
+    if (button2?.dataset.action === "file-dir") {
+      await loadWorkspaceDirectory(button2.dataset.path);
+    }
+  });
+  $("#modal").addEventListener("close", () => {
+    disposeModalSdk();
+    fileBrowser = null;
   });
   document.querySelectorAll(".mobile-tabs button").forEach((button2) => button2.addEventListener("click", () => {
     state.mobilePane = button2.dataset.pane;

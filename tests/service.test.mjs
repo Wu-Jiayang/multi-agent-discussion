@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { once } from "node:events";
 import { createDiscussionService } from "../src/service/main.mjs";
@@ -57,7 +57,7 @@ test("model catalog survives service restart", async () => {
   service.server.listen(0, "127.0.0.1");
   await once(service.server, "listening");
   let base = `http://127.0.0.1:${service.server.address().port}`;
-  await fetch(base + "/plugin/catalog", { method: "POST", headers: { authorization: "Bearer plugin", "content-type": "application/json" }, body: JSON.stringify({ directory: root, models: [{ providerID: "probe", id: "persisted", name: "Persisted" }] }) });
+  await fetch(base + "/plugin/catalog", { method: "POST", headers: { authorization: "Bearer plugin", "content-type": "application/json" }, body: JSON.stringify({ directory: root, models: [{ providerID: "probe", id: "persisted", name: "Persisted", providerName: "Probe", variant: "high" }] }) });
   service.store.close();
   await new Promise(resolveClose => service.server.close(resolveClose));
   service = createDiscussionService(options);
@@ -67,6 +67,8 @@ test("model catalog survives service restart", async () => {
   const response = await fetch(base + `/models?directory=${encodeURIComponent(root)}`, { headers: { authorization: "Bearer host" } });
   const data = await response.json();
   assert.equal(data.models[0].id, "persisted");
+  assert.equal(data.models[0].providerName, "Probe");
+  assert.equal(data.models[0].variant, "high");
   assert.equal(data.source, "project");
   service.store.close();
   await new Promise(resolveClose => service.server.close(resolveClose));
@@ -147,9 +149,22 @@ test("plugin tools, presentation receipts, questions and safe workspace previews
 
     const workspace = (await f.call("GET", `/rooms/${created.roomId}`)).data.workspaceDir;
     writeFileSync(join(workspace, "note.md"), "# 讨论文档\n内容");
+    mkdirSync(join(workspace, "review"));
+    writeFileSync(join(workspace, "review", "findings.txt"), "findings");
+    symlinkSync("/etc/passwd", join(workspace, "escape.md"));
+    const listed = await f.call("POST", "/workspace/list", { roomId: created.roomId });
+    assert.deepEqual(listed.data.entries.map(entry => entry.name), ["review", "note.md"]);
+    assert.equal(listed.data.parentPath, null);
+    assert.equal(listed.data.entries.find(entry => entry.name === "review").kind, "directory");
+    assert.equal(listed.data.entries.find(entry => entry.name === "note.md").kind, "file");
+    const nested = await f.call("POST", "/workspace/list", { roomId: created.roomId, path: join(workspace, "review") });
+    assert.equal(nested.data.entries[0].relativePath, "review/findings.txt");
+    assert.equal(nested.data.parentPath, workspace);
+    const escapedList = await f.call("POST", "/workspace/list", { roomId: created.roomId, path: "/etc" });
+    assert.equal(escapedList.status, 403);
+    assert.equal(escapedList.data.error.code, "ROOM_BAD_PATH");
     const preview = await f.call("POST", "/workspace/read", { roomId: created.roomId, path: join(workspace, "note.md") });
     assert.match(preview.data.content, /讨论文档/);
-    symlinkSync("/etc/passwd", join(workspace, "escape.md"));
     const escaped = await f.call("POST", "/workspace/read", { roomId: created.roomId, path: join(workspace, "escape.md") });
     assert.equal(escaped.status, 403, JSON.stringify(escaped.data));
     assert.equal(escaped.data.error.code, "ROOM_BAD_PATH");

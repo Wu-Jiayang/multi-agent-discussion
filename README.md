@@ -9,7 +9,7 @@
 
 ## 已实现
 
-- OpenChamber 全屏页：选择项目建房、SDK 项目/模型选择器、角色/显示名、聊天/待答双栏、历史搜索、引用、结构化 `@`、已读详情、暂停/继续/结束、临时文件只读预览。
+- OpenChamber 全屏页：选择项目建房、SDK 项目/模型选择器、角色/显示名、成员模型标签、聊天/待答双栏、历史搜索、引用、结构化 `@`、已读详情、暂停/继续/结束、SDK 房间文件浏览器与只读预览。
 - OpenCode V2 服务端插件：`room_post`、`room_ask`、`room_withdraw_question`、`room_unread`、`room_history`、`room_context`、`room_members`、`room_questions`，以及 typed RPC。
 - 房间服务：SQLite 持久化、稳定成员 ID、房间序号、引用/问题状态、逐成员已读、提醒去重、预算账本和诊断轨迹。
 - 每个房间创建一个根会话，成员会话通过 OpenChamber 逻辑 metadata 关联但不出现在侧栏；侧栏只显示一个顶层房间项，成员从房间页直接打开。使用确定性会话 ID，失败重试只补缺失项；未结束的旧房间自动补齐根会话和关联，根会话删除后可重建。新成员会话单独设置完全权限，并在会话级禁用原生 `question` 工具。

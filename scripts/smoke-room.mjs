@@ -206,6 +206,12 @@ async function main() {
       assert.equal(info.data.metadata.openchamber.parentID, room.rootSessionId);
     }
 
+    writeFileSync(join(room.workspaceDir, "smoke.md"), "# 房间文件");
+    const workspaceFiles = await service("POST", "/workspace/list", { roomId });
+    assert.ok(workspaceFiles.entries.some(entry => entry.name === "smoke.md" && entry.kind === "file"));
+    const workspacePreview = await service("POST", "/workspace/read", { roomId, path: join(room.workspaceDir, "smoke.md") });
+    assert.match(workspacePreview.content, /房间文件/);
+
     const health = await oc("/api/rpc/multi-agent-discussion/health", { input: {} }, "POST");
     assert.equal((health.output || health.data || health).plugin, "multi-agent-discussion");
 

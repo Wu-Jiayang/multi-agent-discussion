@@ -528,14 +528,18 @@ test("model variants survive room creation", async () => {
   const root = scratch();
   const store = new RoomStore();
   const engine = new RoomEngine(store);
-  engine.createRoom({ projectDir: root, tempRoot: root, members: [
-    { role: "generic", model: { providerID: "p", id: "a", variant: "high" } },
+  const room = engine.createRoom({ projectDir: root, tempRoot: root, members: [
+    { role: "generic", model: { providerID: "p", id: "a", name: "Model A", providerName: "Probe", variant: "high" } },
     { role: "generic", model: { providerID: "p", id: "b" } },
   ] });
   const rootJob = engine.nextJob();
   assert.equal(rootJob.type, "create-root-session");
   await engine.jobResult(rootJob, { outcome: "accepted", sessionId: rootJob.sessionId });
-  assert.equal(engine.nextJob().model.variant, "high");
+  const memberJob = engine.nextJob();
+  assert.equal(memberJob.model.variant, "high");
+  const saved = store.roomSummary(store.room(room.roomId)).members[0].model;
+  assert.equal(saved.providerName, "Probe");
+  assert.equal(saved.variant, "high");
 });
 
 test("instruction refresh failures on ready members are visible and back off", async () => {

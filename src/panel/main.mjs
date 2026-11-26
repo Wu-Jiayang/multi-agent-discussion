@@ -1,5 +1,5 @@
 import { connectHost } from "@openchamber/sdk";
-import { applyHostReady, mountSelect } from "@openchamber/sdk/ui";
+import { applyHostReady, mountBanner, mountButton, mountEmpty, mountList, mountSearchField, mountSelect, mountSpinner, mountText } from "@openchamber/sdk/ui";
 
 const host = connectHost();
 const $ = selector => document.querySelector(selector);
@@ -186,6 +186,23 @@ function selectProject(id) {
 }
 
 function modelKey(model) { return model ? JSON.stringify([model.providerID, model.id, model.variant || ""]) : ""; }
+function memberModelInfo(member) {
+  const model = member?.model;
+  if (!model?.providerID || !model?.id) return null;
+  const exact = state.models.find(item => item.providerID === model.providerID && item.id === model.id && (item.variant || "") === (model.variant || ""));
+  const catalog = exact || state.models.find(item => item.providerID === model.providerID && item.id === model.id);
+  return {
+    provider: catalog?.providerName || model.providerName || model.providerID,
+    name: catalog?.name || model.name || model.id,
+    variant: model.variant || "",
+  };
+}
+function memberModelPill(member) {
+  const info = memberModelInfo(member);
+  if (!info) return "";
+  const label = `${info.provider} · ${info.name}${info.variant ? ` (${info.variant})` : ""}`;
+  return `<span class="pill model" title="${escape(label)}">${escape(label)}</span>`;
+}
 function modelSelectOptions() {
   return state.models.map(model => ({
     id: modelKey(model),
@@ -442,8 +459,9 @@ function renderRoomHeader() {
   const rootPill = rootStatus === "ready" ? "running" : rootStatus === "failed" ? "unknown" : "waiting-human";
   const rootChip = rootStatus || room.rootSessionId ? `<span class="member-chip root-session"><span>根会话</span>${rootStatus ? `<span class="pill ${rootPill}">${escape(rootStatusLabels[rootStatus] || rootStatus)}</span>` : ""}${room.rootSessionId ? `<button data-action="open-root-session" data-session="${escape(room.rootSessionId)}">会话组</button>` : ""}</span>` : "";
   $("#room-header").innerHTML = `
-    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">人类 · 房主</span></span>${room.members.map(member => `<span class="member-chip"><span>${escape(member.displayName)}</span>${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">创建失败：${escape(member.creationError || "未知原因")}</span>` : member.taskError ? `<span class="pill waiting-human">指令同步失败：${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">会话</button>` : ""}</span>`).join("")}</div></div>
+    <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">人类 · 房主</span></span>${room.members.map(member => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">创建失败：${escape(member.creationError || "未知原因")}</span>` : member.taskError ? `<span class="pill waiting-human">指令同步失败：${escape(member.taskError)}</span><span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>` : `<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">会话</button>` : ""}</span>`).join("")}</div></div>
     <div class="room-controls">
+      <button class="button ghost" data-action="open-workspace">文件</button>
       <span class="pill budget">余额 ${room.budget.remaining}/${room.budget.limit} · 第 ${room.budget.period} 段</span>
       ${room.status === "creating" ? `<button class="button secondary" data-action="retry">重试缺失会话</button>` : room.status !== "ended" ? `${paused ? `<button class="button primary" data-action="resume">继续房间</button>` : `<button class="button secondary" data-action="pause">暂停唤醒</button>`}<button class="button ghost danger" data-action="end">结束房间</button>` : ""}
     </div>
@@ -660,15 +678,193 @@ async function openMessage(messageId) {
   await loadTimeline(false, null, messageId);
   persistView();
 }
+const modalSdkHandles = new Map();
+let fileBrowser = null;
+function disposeModalSdk() {
+  for (const handle of modalSdkHandles.values()) handle.dispose();
+  modalSdkHandles.clear();
+}
+function clearModalRoot(root) {
+  modalSdkHandles.get(root)?.dispose();
+  modalSdkHandles.delete(root);
+  root.replaceChildren();
+}
+function mountModalRoot(root, mount) {
+  if (!root || typeof root.append !== "function") throw new Error(`Invalid SDK mount root: ${root?.constructor?.name || String(root)}`);
+  clearModalRoot(root);
+  const handle = mount(root);
+  modalSdkHandles.set(root, handle);
+  return handle;
+}
+function formatBytes(value) {
+  if (!Number.isFinite(value)) return "";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+function parentDirectory(path) {
+  const at = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return at > 0 ? path.slice(0, at) : path;
+}
+function fileName(path) {
+  const at = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return path.slice(at + 1);
+}
+function textPreviewable(path) {
+  return /\.(md|markdown|txt|log|csv)$/i.test(path);
+}
 function showModal(title, content) {
+  disposeModalSdk();
+  fileBrowser = null;
   $("#modal-content").innerHTML = `<h2>${escape(title)}</h2>${content}<div class="modal-actions"><button class="button secondary" data-action="close-modal">关闭</button></div>`;
+  $("#modal").classList.remove("file-browser-dialog");
   $("#modal").showModal();
 }
-async function openFile(path) {
+function renderWorkspaceBreadcrumb() {
+  if (!fileBrowser?.data) return;
+  const root = fileBrowser.rootPath;
+  const current = fileBrowser.data.path;
+  const relativePath = current === root ? "" : current.slice(root.length).replace(/^[\\/]+/, "");
+  const parts = relativePath ? relativePath.split(/[\\/]+/) : [];
+  let path = root;
+  const items = [{ label: "房间文件", path: root }];
+  for (const part of parts) {
+    path = `${path.replace(/\/$/, "")}/${part}`;
+    items.push({ label: part, path });
+  }
+  $("#file-breadcrumb").innerHTML = items.map((item, index) => `${index ? '<span class="breadcrumb-sep">/</span>' : ""}<button class="button ghost" data-action="file-dir" data-path="${escape(item.path)}">${escape(item.label)}</button>`).join("");
+}
+function updateWorkspaceToolbar() {
+  const up = modalSdkHandles.get($("#file-up"));
+  up?.update({ disabled: !fileBrowser?.data?.parentPath });
+}
+function renderWorkspaceToolbar() {
+  mountModalRoot($("#file-search"), target => mountSearchField(target, {
+    value: fileBrowser.query,
+    placeholder: "搜索当前目录文件",
+    label: "搜索房间文件",
+    onChange: value => { fileBrowser.query = value; renderWorkspaceList(); },
+  }));
+  mountModalRoot($("#file-refresh"), target => mountButton(target, {
+    label: "刷新", variant: "outline", size: "sm",
+    onClick: () => void loadWorkspaceDirectory(fileBrowser.path || fileBrowser.rootPath),
+  }));
+  mountModalRoot($("#file-up"), target => mountButton(target, {
+    label: "上一级", variant: "outline", size: "sm", disabled: true,
+    onClick: () => fileBrowser.data?.parentPath && void loadWorkspaceDirectory(fileBrowser.data.parentPath),
+  }));
+  updateWorkspaceToolbar();
+}
+function renderWorkspaceList() {
+  if (!fileBrowser?.data) return;
+  const root = $("#file-list");
+  const query = fileBrowser.query.trim().toLowerCase();
+  const entries = fileBrowser.data.entries.filter(entry => !query || entry.name.toLowerCase().includes(query) || entry.relativePath.toLowerCase().includes(query));
+  if (!entries.length) {
+    mountModalRoot(root, target => mountEmpty(target, { title: query ? "没有匹配的文件" : "这个目录是空的", body: query ? "换个关键词试试。" : "Agent 写入的讨论文档会显示在这里。" }));
+    return;
+  }
+  const byId = new Map(entries.map(entry => [encodeURIComponent(entry.relativePath), entry]));
+  const selectedEntry = fileBrowser.selectedPath ? fileBrowser.data.entries.find(entry => entry.path === fileBrowser.selectedPath) : null;
+  mountModalRoot(root, target => mountList(target, {
+    items: [...byId].map(([id, entry]) => ({
+      id,
+      title: entry.name,
+      subtitle: entry.relativePath,
+      leading: entry.kind === "directory" ? "▸" : "·",
+      meta: entry.kind === "file" ? formatBytes(entry.size) : "目录",
+    })),
+    selectedId: selectedEntry ? encodeURIComponent(selectedEntry.relativePath) : null,
+    emptyText: "没有文件",
+    ariaLabel: "房间文件列表",
+    onSelect: id => {
+      const entry = byId.get(id);
+      if (!entry) return;
+      if (entry.kind === "directory") void loadWorkspaceDirectory(entry.path);
+      else queueMicrotask(() => void previewWorkspacePath(entry.path));
+    },
+  }));
+}
+async function loadWorkspaceDirectory(path, previewPath = null) {
+  if (!fileBrowser || !state.roomId) return;
+  const roomId = state.roomId;
+  const generation = ++fileBrowser.generation;
+  fileBrowser.path = path;
+  mountModalRoot($("#file-list"), target => mountSpinner(target, { label: "正在读取目录…" }));
   try {
-    const file = await request("POST", "/workspace/read", { roomId: state.roomId, path });
-    showModal(file.path, `<pre>${escape(file.content)}</pre>`);
-  } catch (error) { showError(error); }
+    const data = await request("POST", "/workspace/list", { roomId, path });
+    if (!fileBrowser || fileBrowser.roomId !== roomId || fileBrowser.generation !== generation) return;
+    fileBrowser.data = data;
+    fileBrowser.path = data.path;
+    renderWorkspaceBreadcrumb();
+    updateWorkspaceToolbar();
+    renderWorkspaceList();
+    if (previewPath) void previewWorkspacePath(previewPath);
+  } catch (error) {
+    if (!fileBrowser || fileBrowser.roomId !== roomId || fileBrowser.generation !== generation) return;
+    mountModalRoot($("#file-list"), target => mountBanner(target, {
+      tone: "error", title: "无法读取目录", body: error.message,
+      action: { label: "重试", onClick: () => void loadWorkspaceDirectory(path, previewPath) },
+    }));
+  }
+}
+async function previewWorkspacePath(path) {
+  if (!fileBrowser || !state.roomId) return;
+  const roomId = state.roomId;
+  const generation = fileBrowser.generation;
+  fileBrowser.selectedPath = path;
+  renderWorkspaceList();
+  $("#file-preview-title").textContent = fileName(path);
+  $("#file-preview-title").title = path;
+  const root = $("#file-preview-content");
+  mountModalRoot(root, target => mountSpinner(target, { label: "正在读取文件…" }));
+  try {
+    const file = await request("POST", "/workspace/read", { roomId, path });
+    if (!fileBrowser || fileBrowser.roomId !== roomId || fileBrowser.generation !== generation) return;
+    if (!file.content) {
+      mountModalRoot(root, target => mountEmpty(target, { title: "文件为空", body: file.path }));
+    } else if (textPreviewable(file.path)) {
+      mountModalRoot(root, target => mountText(target, { text: file.content, onOpenUrl: url => void host.openUrl(url) }));
+    } else {
+      clearModalRoot(root);
+      const pre = document.createElement("pre");
+      pre.textContent = file.content;
+      root.append(pre);
+    }
+  } catch (error) {
+    if (!fileBrowser || fileBrowser.roomId !== roomId || fileBrowser.generation !== generation) return;
+    mountModalRoot(root, target => mountBanner(target, {
+      tone: "error", title: "无法预览文件", body: error.message,
+      action: { label: "重试", onClick: () => void previewWorkspacePath(path) },
+    }));
+  }
+}
+async function openWorkspaceBrowser(previewPath = null) {
+  if (!state.roomId || !state.room?.workspaceDir) return showError(new Error("当前房间没有可浏览的临时目录。"));
+  disposeModalSdk();
+  const roomId = state.roomId;
+  fileBrowser = {
+    roomId, rootPath: state.room.workspaceDir, path: state.room.workspaceDir,
+    data: null, entries: [], query: "", selectedPath: previewPath, generation: 0,
+  };
+  $("#modal-content").innerHTML = `
+    <h2>房间文件</h2>
+    <div class="file-browser">
+      <div class="file-browser-toolbar">
+        <div id="file-breadcrumb" class="file-breadcrumb"></div>
+        <div id="file-search" class="file-search"></div>
+        <div class="file-toolbar-actions"><div id="file-up"></div><div id="file-refresh"></div></div>
+      </div>
+      <div class="file-browser-body">
+        <div id="file-list" class="file-list"></div>
+        <section class="file-preview"><div id="file-preview-title" class="file-preview-title">选择一个文件</div><div id="file-preview-content" class="file-preview-content"></div></section>
+      </div>
+    </div>
+    <div class="modal-actions"><button class="button secondary" data-action="close-modal">关闭</button></div>`;
+  $("#modal").classList.add("file-browser-dialog");
+  $("#modal").showModal();
+  renderWorkspaceToolbar();
+  await loadWorkspaceDirectory(previewPath ? parentDirectory(previewPath) : fileBrowser.rootPath, previewPath);
 }
 async function showReceipts(messageId) {
   const receipts = await request("GET", `/rooms/${encodeURIComponent(state.roomId)}/messages/${encodeURIComponent(messageId)}/receipts`);
@@ -763,7 +959,8 @@ app.addEventListener("click", async event => {
   if (action === "select-question") { await selectQuestion(button.dataset.question, button.dataset.message); return; }
   if (action === "receipts") { await showReceipts(button.dataset.message); return; }
   if (action === "copy-locator") { await host.writeClipboard(`讨论室 ${state.room.title} · #${button.dataset.seq} · ${button.dataset.message}`); toast("已复制稳定定位信息。", "success"); return; }
-  if (action === "open-file") { await openFile(button.dataset.path); return; }
+  if (action === "open-workspace") { await openWorkspaceBrowser(); return; }
+  if (action === "open-file") { await openWorkspaceBrowser(button.dataset.path); return; }
   if (action === "more-questions") { await loadQuestions(true); return; }
   if (action === "withdraw-question") {
     const note = prompt("撤回说明（可留空）", "");
@@ -818,7 +1015,13 @@ $("#older-button").addEventListener("click", async () => { if (state.timelineCur
 $("#latest-button").addEventListener("click", async () => { state.chatAnchor = null; state.search = ""; state.author = ""; $("#history-search").value = ""; renderAuthorFilter(); state.followLatest = true; await loadTimeline(true); });
 $("#timeline").addEventListener("scroll", () => { state.chatScroll = $("#timeline").scrollTop; if (!state.chatAnchor) state.followLatest = $("#timeline").scrollHeight - $("#timeline").scrollTop - $("#timeline").clientHeight < 100; persistViewSoon(); });
 $("#question-list").addEventListener("scroll", () => { state.questionScroll = $("#question-list").scrollTop; persistViewSoon(); });
-$("#modal").addEventListener("click", event => { if (event.target === $("#modal")) $("#modal").close(); });
+$("#modal").addEventListener("click", async event => {
+  if (event.target === $("#modal")) { $("#modal").close(); return; }
+  const button = event.target.closest("[data-action]");
+  if (button?.dataset.action === "close-modal") { $("#modal").close(); return; }
+  if (button?.dataset.action === "file-dir") { await loadWorkspaceDirectory(button.dataset.path); }
+});
+$("#modal").addEventListener("close", () => { disposeModalSdk(); fileBrowser = null; });
 document.querySelectorAll(".mobile-tabs button").forEach(button => button.addEventListener("click", () => { state.mobilePane = button.dataset.pane; $("#room-view").dataset.mobilePane = state.mobilePane; document.querySelectorAll(".mobile-tabs button").forEach(item => item.classList.toggle("active", item === button)); persistView(); }));
 document.addEventListener("keydown", event => { if (event.key === "Escape") hideMentionMenu(); });
 

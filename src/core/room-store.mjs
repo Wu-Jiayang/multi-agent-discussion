@@ -277,7 +277,7 @@ export class RoomStore {
       names.add(key);
       const model = spec.model;
       if (!model || typeof model.providerID !== "string" || typeof model.id !== "string") fail("ROOM_INVALID_INPUT", "Every agent needs a providerID and model id.");
-      return { id: id("m"), role, displayName, model: { providerID: model.providerID, id: model.id, name: model.name || model.id, ...(model.variant ? { variant: model.variant } : {}) } };
+      return { id: id("m"), role, displayName, model: { providerID: model.providerID, id: model.id, name: model.name || model.id, providerName: model.providerName || model.provider?.name || model.providerID, ...(model.variant ? { variant: model.variant } : {}) } };
     });
     const roomId = id("r");
     const rootSessionId = `ses_disc_${roomId}_root`;
