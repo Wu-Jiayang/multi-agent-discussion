@@ -6,6 +6,7 @@
 - [MVP 设计](docs/design.md)
 - [演示与测试场景](docs/scenarios.md)
 - [OpenCode 投递与已读实测](docs/opencode-delivery-probe.md)
+- [与 OpenClaw 群聊对比（普通用户版）](docs/openclaw-comparison.md)
 
 ## 已实现
 
