@@ -38,17 +38,22 @@ const changed = execFileSync("git", ["diff", "--name-only", `${base}...${head}`]
   .split("\n")
   .map((line) => line.trim())
   .filter(Boolean);
-const productChanged = changed.some((path) => path.startsWith("src/") || path.startsWith("panel/"));
+const isProductFile = (path) =>
+  ["src/", "panel/", "plugin/", "service/"].some((prefix) => path.startsWith(prefix)) ||
+  path === "scripts/build.mjs" ||
+  path === "package.json" ||
+  path === "package-lock.json";
+const productChanged = changed.some(isProductFile);
 
 if (productChanged) {
   let previous;
   try {
     previous = readJsonFromGit(`${base}:package.json`).version;
   } catch {
-    fail(`无法从 ${base} 读取package.json，不能确认版本是否升级`);
+    fail(`无法从 ${base} 读取 package.json，不能确认版本是否升级`);
   }
   if (previous && !isGreater(version, previous)) {
-    fail(`src/ 或 panel/ 有改动，版本号必须从 ${previous} 升到更高版本，当前是 ${version}`);
+    fail(`产品文件或依赖清单有改动，版本号必须从 ${previous} 升到更高版本，当前是 ${version}`);
   }
 }
 
@@ -79,7 +84,7 @@ else {
   console.log(
     productChanged
       ? `version-check: 版本 ${version} 一致，且已相对基线升级`
-      : `version-check: 版本 ${version} 一致，未改动 src/ 或 panel/，无需升级`,
+      : `version-check: 版本 ${version} 一致，未改动产品文件或依赖清单，无需升级`,
   );
 }
 

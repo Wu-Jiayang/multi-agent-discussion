@@ -30,7 +30,9 @@ npm run smoke
 
 `smoke` 会启动隔离的 OpenCode、OpenChamber 和本地模拟模型，不调用外部模型，结束后自行清理。
 
-PR 修改 `src/` 或 `panel/` 时，CI 要求同步升级版本号，并校验 lockfile、health 和测试断言里的版本一致；只改文档不要求升级。
+PR 修改 `src/`、`panel/`、`plugin/`、`service/`、`scripts/build.mjs` 或依赖清单时，CI 要求同步升级版本号，并校验 lockfile、health 和测试断言里的版本一致；只改文档和测试不要求升级。
+
+这个检查要在 main 的分支保护里设为必需，并开启「合并前分支必须是最新的」，才能挡住并行 PR 都升到同一个版本的情况。
 
 在 OpenChamber 中：
 
