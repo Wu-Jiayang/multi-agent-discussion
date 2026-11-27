@@ -103,11 +103,6 @@ test("HTTP service authenticates host/plugin separately and creates rooms withou
     const memberJobs = jobs.filter(job => job.type === "create-session");
     assert.ok(memberJobs.every(job => job.metadata.openchamber.kind === "operator-child"));
     assert.ok(memberJobs.every(job => job.metadata.openchamber.parentID === created.rootSessionId));
-    const target = await f.call("GET", `/room-for-root-session?sessionId=${created.rootSessionId}`);
-    assert.deepEqual(target, { status: 200, data: { roomId: created.roomId, projectDir: realpathSync(f.root) } });
-    const memberTarget = await f.call("GET", `/room-for-root-session?sessionId=${memberJobs[0].sessionId}`);
-    assert.equal(memberTarget.status, 404);
-    assert.equal(memberTarget.data.error.code, "ROOM_NOT_FOUND");
     const room = (await f.call("GET", `/rooms/${created.roomId}`)).data;
     assert.equal(room.status, "ready");
     assert.equal(room.rootCreationStatus, "ready");

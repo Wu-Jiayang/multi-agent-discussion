@@ -6,7 +6,6 @@ import { decodeCursor, encodeCursor, requireCursor } from "./cursor.mjs";
 import { assertAgentWidth, MAX_AGENT_MESSAGE_WIDTH } from "./display-width.mjs";
 import { fail } from "./errors.mjs";
 
-const PREVIOUS_RULES_VERSIONS = ["room-rules-2026-11-26", "room-rules-2026-11-27"];
 export const RULES_VERSION = "room-rules-2026-11-27-chat";
 export const ROLE_LABELS = { generic: "通用", proposer: "提案者", reviewer: "审查者", moderator: "主持人" };
 export const QUESTION_STATUSES = new Set(["pending", "answered", "withdrawn"]);
@@ -207,9 +206,9 @@ export class RoomStore {
     }
     this.tx(() => {
       this.db.prepare(`UPDATE members SET instructions_added=0 WHERE kind='agent' AND room_id IN
-        (SELECT id FROM rooms WHERE status<>'ended' AND rules_version IN (?,?))`).run(...PREVIOUS_RULES_VERSIONS);
+        (SELECT id FROM rooms WHERE status<>'ended' AND rules_version<>?)`).run(RULES_VERSION);
       this.db.prepare(`UPDATE rooms SET rules_version=?,config_json=json_set(config_json,'$.roles',?)
-        WHERE status<>'ended' AND rules_version IN (?,?)`).run(RULES_VERSION, RULES_VERSION, ...PREVIOUS_RULES_VERSIONS);
+        WHERE status<>'ended' AND rules_version<>?`).run(RULES_VERSION, RULES_VERSION, RULES_VERSION);
     });
   }
 
@@ -231,12 +230,6 @@ export class RoomStore {
     const row = this.db.prepare("SELECT * FROM rooms WHERE id=?").get(id);
     if (!row) fail("ROOM_NOT_FOUND", "Room not found.", { roomId: id }, 404);
     return row;
-  }
-
-  roomForRootSession(sessionId) {
-    const row = this.db.prepare("SELECT id, project_dir FROM rooms WHERE root_session_id=?").get(sessionId);
-    if (!row) fail("ROOM_NOT_FOUND", "Room not found.", {}, 404);
-    return { roomId: row.id, projectDir: row.project_dir };
   }
 
   member(id) {

@@ -134,7 +134,7 @@ test("successful agent sends keep unread messages and one existing anchor within
 test("opening an existing room queues updated instructions without resetting the room", () => {
   const file = join(scratch(), "room.sqlite");
   const { store, roomId, close } = setup({ filename: file });
-  store.db.prepare("UPDATE rooms SET rules_version=? WHERE id=?").run("room-rules-2026-11-26", roomId);
+  store.db.prepare("UPDATE rooms SET rules_version=? WHERE id=?").run("room-rules-legacy", roomId);
   close();
   const reopened = new RoomStore(file);
   assert.equal(reopened.room(roomId).rules_version, RULES_VERSION);

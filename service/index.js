@@ -9281,7 +9281,6 @@ function assertAgentWidth(text, label = "message") {
 }
 
 // src/core/room-store.mjs
-var PREVIOUS_RULES_VERSIONS = ["room-rules-2026-11-26", "room-rules-2026-11-27"];
 var RULES_VERSION = "room-rules-2026-11-27-chat";
 var ROLE_LABELS = { generic: "\u901A\u7528", proposer: "\u63D0\u6848\u8005", reviewer: "\u5BA1\u67E5\u8005", moderator: "\u4E3B\u6301\u4EBA" };
 var QUESTION_STATUSES = /* @__PURE__ */ new Set(["pending", "answered", "withdrawn"]);
@@ -9489,9 +9488,9 @@ var RoomStore = class {
     }
     this.tx(() => {
       this.db.prepare(`UPDATE members SET instructions_added=0 WHERE kind='agent' AND room_id IN
-        (SELECT id FROM rooms WHERE status<>'ended' AND rules_version IN (?,?))`).run(...PREVIOUS_RULES_VERSIONS);
+        (SELECT id FROM rooms WHERE status<>'ended' AND rules_version<>?)`).run(RULES_VERSION);
       this.db.prepare(`UPDATE rooms SET rules_version=?,config_json=json_set(config_json,'$.roles',?)
-        WHERE status<>'ended' AND rules_version IN (?,?)`).run(RULES_VERSION, RULES_VERSION, ...PREVIOUS_RULES_VERSIONS);
+        WHERE status<>'ended' AND rules_version<>?`).run(RULES_VERSION, RULES_VERSION, RULES_VERSION);
     });
   }
   close() {
@@ -9515,11 +9514,6 @@ var RoomStore = class {
     const row = this.db.prepare("SELECT * FROM rooms WHERE id=?").get(id2);
     if (!row) fail("ROOM_NOT_FOUND", "Room not found.", { roomId: id2 }, 404);
     return row;
-  }
-  roomForRootSession(sessionId) {
-    const row = this.db.prepare("SELECT id, project_dir FROM rooms WHERE root_session_id=?").get(sessionId);
-    if (!row) fail("ROOM_NOT_FOUND", "Room not found.", {}, 404);
-    return { roomId: row.id, projectDir: row.project_dir };
   }
   member(id2) {
     const row = this.db.prepare("SELECT * FROM members WHERE id=?").get(id2);
@@ -11390,9 +11384,6 @@ function createDiscussionService(options = {}) {
       return json2(res, 200, { ok: true });
     }
     if (req.method === "GET" && url.pathname === "/meta") return json2(res, 200, { humanName: defaultHumanName() });
-    if (req.method === "GET" && url.pathname === "/room-for-root-session") {
-      return json2(res, 200, store.roomForRootSession(query(url).sessionId || ""));
-    }
     if (req.method === "GET" && url.pathname === "/models") {
       const directory = query(url).directory;
       const scoped = directory ? modelCatalogs.get(directory) : void 0;

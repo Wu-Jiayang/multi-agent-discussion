@@ -35,7 +35,7 @@ let questions=[{questionId:'q_1',messageId:'m_question_1',roomSeq:2,asker:member
 let holdRoomRefresh = false;
 let heldRoomRequestId;
 function response(m,payload={}){dom.window.dispatchEvent(new dom.window.MessageEvent('message',{data:{channel:'openchamber.sdk',v:1,type:'result',id:m.id,ok:true,payload},source:dom.window.parent}));}
-function mountPanel(item = null) {
+function mountPanel() {
  return new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html',pretendToBeVisual:true,virtualConsole,beforeParse(window){
   const NativeMessageEvent = window.MessageEvent;
   window.MessageEvent = class extends NativeMessageEvent {
@@ -45,7 +45,7 @@ function mountPanel(item = null) {
   parent.postMessage = message => {
     hostCalls.push({type:message.type,payload:message.payload});
     queueMicrotask(()=>{
-       if(message.type==='hello'){window.dispatchEvent(new window.MessageEvent('message',{data:{channel:'openchamber.sdk',v:1,type:'ready',payload:{theme:{mode:'dark',tokens},locale:'zh-CN',directory:'/workspace/demo',session:null,surface:'page',item,connection:null,settings:{},device:{formFactor:'desktop',pointer:'fine',insets:{top:0,right:0,bottom:0,left:0},keyboard:0}}},source:window.parent}));return}
+       if(message.type==='hello'){window.dispatchEvent(new window.MessageEvent('message',{data:{channel:'openchamber.sdk',v:1,type:'ready',payload:{theme:{mode:'dark',tokens},locale:'zh-CN',directory:'/workspace/demo',session:null,surface:'page',item:null,connection:null,settings:{},device:{formFactor:'desktop',pointer:'fine',insets:{top:0,right:0,bottom:0,left:0},keyboard:0}}},source:window.parent}));return}
       if(message.type==='storage'){const op=message.payload.op;response({id:message.id},{op,storage:op==='get'?{op:'get',found:false}:{op}});return}
       if(message.type==='workspace-read'){response({id:message.id},{kind:'projects',state:'ready',projects});return}
       if(message.type==='workspace-subscribe'){
@@ -63,14 +63,7 @@ function mountPanel(item = null) {
           if(directory==='/workspace/other')data={models:[{providerID:'probe',id:'global',name:'全局模型',providerName:'Probe'}],source:'global'};
           else data={models:[{providerID:'probe',id:'a',name:'模型 A',variant:'high',providerName:'Probe'},{providerID:'probe',id:'b',name:'模型 B',providerName:'Probe'}],source:'project'};
         }
-         else if(p.path==='/room-for-root-session'){
-           if (p.query?.sessionId!==room.rootSessionId) {
-             response({id:message.id},{status:404,body:JSON.stringify({error:{code:'ROOM_NOT_FOUND'}})});
-             return;
-           }
-           data={roomId:room.roomId,projectDir:'/workspace/other'};
-         }
-         else if(p.path==='/rooms')data={rooms:item?[{...room,roomId:'r_other',title:'另一个房间'},room]:[room]};
+        else if(p.path==='/rooms')data={rooms:[room]};
         else if(p.path==='/rooms/'+room.roomId+''){
           if (holdRoomRefresh) { heldRoomRequestId = message.id; return; }
           data=room;
@@ -267,17 +260,5 @@ assert.ok(serviceCalls.some(call=>call.path==='/models'&&call.query?.directory==
 assert.deepEqual(errors,[]);
 console.log('PASS panel DOM smoke: project picker, SDK model picker, member model change, failure pills, provider quota hint, create form, role defaults, question answer, withdraw/end dialogs, composer, receipts modal, global fallback');
  window.close();
- const rootLaunch = { kind:'session', action:'discussion-room', sessionId:room.rootSessionId, sessionTitle:room.title, directory:'/workspace/demo' };
- const callsBeforeLaunch = serviceCalls.length;
- dom=mountPanel(rootLaunch);
- const launchedDocument = dom.window.document;
- await waitFor(() => launchedDocument.querySelector('#room-header').textContent.includes(room.title), 'root launch opens the matching room');
- assert.equal(launchedDocument.querySelector('#room-select').value, room.roomId);
- assert.ok(serviceCalls.slice(callsBeforeLaunch).some(call => call.path==='/rooms' && call.query?.projectDir==='/workspace/other'));
- dom.window.close();
- dom=mountPanel({...rootLaunch,sessionId:'ses_missing_room'});
- await waitFor(() => hostCalls.some(call => call.type==='open-session' && call.payload?.sessionId==='ses_missing_room'), 'missing room falls back to its session');
- assert.deepEqual(errors,[]);
- dom.window.close();
  store.close();
 rmSync(panelRoot,{recursive:true,force:true});

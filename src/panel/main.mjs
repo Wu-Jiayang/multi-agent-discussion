@@ -76,7 +76,6 @@ function renderRoomSelect() {
 let projectSelectHandle = null;
 let projectsLoaded = false;
 let projectsSubscribed = false;
-let resolvingRootSession = false;
 const modelHandles = new Map();
 let agentUid = 0;
 
@@ -144,7 +143,6 @@ function applyProjectsSnapshot(snapshot) {
     return;
   }
   state.projects = nextProjects;
-  if (resolvingRootSession) return;
   resolveProjectSelection();
   updateProjectPicker();
   if (state.projectDir !== previousDir) void reloadProjectContext();
@@ -1204,15 +1202,8 @@ setInterval(() => void refreshOpenRoom(), REFRESH_INTERVAL_MS);
 mountProjectPicker();
 
 let readyGeneration = 0;
-let rootSessionOpened = false;
 host.onReady(async ctx => {
   applyHostReady(ctx, document.documentElement);
-  const rootSession = ctx.item?.kind === "session" && ctx.item.action === "discussion-room" ? ctx.item : null;
-  if (rootSession && rootSessionOpened) return;
-  if (rootSession) {
-    rootSessionOpened = true;
-    resolvingRootSession = true;
-  }
   const generation = ++readyGeneration;
   const directoryChanged = ctx.directory !== state.directory;
   const previousProjectDir = state.projectDir;
@@ -1222,35 +1213,6 @@ host.onReady(async ctx => {
     projectsLoaded = true;
     subscribeProjects();
     void loadProjects();
-  }
-  if (rootSession) {
-    let target, saved;
-    try {
-      [target, saved] = await Promise.all([
-        request("GET", "/room-for-root-session", null, { sessionId: rootSession.sessionId }),
-        host.storage.get("discussion-view").catch(() => null),
-      ]);
-    } catch (error) {
-      try { await host.openSession(rootSession.sessionId); }
-      catch { showError(error); }
-      return;
-    } finally {
-      resolvingRootSession = false;
-    }
-    try {
-      state.directory = target.projectDir;
-      state.projectDir = target.projectDir;
-      if (saved?.roomId === target.roomId) {
-        state.pendingView = saved;
-        if (saved.questionStatus) state.questionStatus = saved.questionStatus;
-        if (saved.mobilePane) state.mobilePane = saved.mobilePane;
-      }
-      resolveProjectSelection();
-      updateProjectPicker();
-      const context = ++state.contextGeneration;
-      await Promise.all([refreshModels(true, context), loadRooms(target.roomId, context)]);
-    } catch (error) { showError(error); }
-    return;
   }
   if (directoryChanged) {
     if (!state.projectManual) { state.projectDir = ctx.directory; state.projectId = null; }
