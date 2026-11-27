@@ -1,12 +1,96 @@
 // src/plugin/index.mjs
 import { readFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// src/core/message-limits.mjs
+var MAX_AGENT_MESSAGE_WIDTH = 200;
+
+// src/plugin/tool-output.mjs
+import { createHash } from "node:crypto";
+var presentationTools = /* @__PURE__ */ new Set(["room_post", "room_ask", "room_unread", "room_history", "room_context"]);
+function compactMessage(row) {
+  const { messageId, roomSeq, author, text } = row;
+  const message = { messageId, roomSeq, author, text };
+  if (row.isOwn) message.isOwn = true;
+  if (row.kind && row.kind !== "post") message.kind = row.kind;
+  if (row.mentions?.length) message.mentions = row.mentions.map((member) => ({ memberId: member.id, displayName: member.display_name }));
+  if (row.mentionAll) message.mentionAll = true;
+  if (row.options?.length) message.options = row.options;
+  if (row.questionId) message.questionId = row.questionId;
+  if (row.questionStatus) message.questionStatus = row.questionStatus;
+  if (row.answerMessageId) message.answerMessageId = row.answerMessageId;
+  if (row.unread) message.unread = true;
+  if (row.preview) message.preview = true;
+  if (row.replyTo) {
+    message.replyTo = row.replyTo.unavailable ? { messageId: row.replyTo.messageId, unavailable: true } : compactMessage(row.replyTo);
+  }
+  return message;
+}
+function roomToolOutput(name, result) {
+  if (!presentationTools.has(name)) return { content: JSON.stringify(result) };
+  const { checkDecision, presentation, ...visible } = result;
+  if (visible.timeline) visible.timeline = visible.timeline.map(compactMessage);
+  if (visible.items) {
+    visible.items = visible.items.map((item) => item.author && typeof item.text === "string" ? compactMessage(item) : item);
+  }
+  if (visible.messageId === null) delete visible.messageId;
+  if (visible.roomSeq === null) delete visible.roomSeq;
+  if (visible.questionId === null) delete visible.questionId;
+  if (visible.mentionHint === null) delete visible.mentionHint;
+  for (const key2 of ["nextCursor", "previousCursor", "omittedBefore"]) {
+    if (visible[key2] === null) delete visible[key2];
+  }
+  if (visible.unreadMessageIds && visible.items) delete visible.unreadMessageIds;
+  if (visible.unread) {
+    const { unreadCount, unreadMentionCount, unreadMentions, mentionCursor } = visible.unread;
+    visible.unread = { unreadCount, unreadMentionCount };
+    if (unreadMentions?.length) visible.unread.unreadMentions = unreadMentions;
+    if (mentionCursor) visible.unread.mentionCursor = mentionCursor;
+  }
+  return {
+    content: JSON.stringify(visible),
+    ...presentation?.presentationId ? { metadata: { discussionPresentationId: presentation.presentationId } } : {}
+  };
+}
+function roomResultKey(id, name, text) {
+  return createHash("sha256").update(JSON.stringify([id, name, text])).digest("hex");
+}
+function roomPresentationResults(messages) {
+  const results = [];
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (part.type !== "tool-result" || !presentationTools.has(part.name)) continue;
+      const result = part.result;
+      const text = result?.type === "text" ? result.value : result?.type === "content" && result.value?.length === 1 ? result.value[0].text : null;
+      if (typeof text === "string") results.push({ key: roomResultKey(part.id, part.name, text), text });
+    }
+  }
+  return results;
+}
+function storedRoomPresentations(messages, keys) {
+  const found = /* @__PURE__ */ new Map();
+  for (const message of messages) {
+    if (message.type !== "assistant") continue;
+    for (const part of message.content) {
+      if (part.type !== "tool" || part.state.status !== "completed" || !presentationTools.has(part.name)) continue;
+      const text = part.state.content[0]?.text;
+      const id = part.state.metadata?.discussionPresentationId;
+      if (typeof id !== "string" || typeof text !== "string") continue;
+      const key2 = roomResultKey(part.id, part.name, text);
+      if (keys.has(key2)) found.set(key2, id);
+    }
+  }
+  return found;
+}
+
+// src/plugin/index.mjs
 var root = resolve(dirname(dirname(fileURLToPath(import.meta.url))));
 var temp = process.env.TMPDIR || process.env.TEMP || process.env.TMP || "/tmp";
 var tempRoot = temp.replace(/\/$/, "").endsWith("/opencode") ? temp : join(temp, "opencode");
-var key = createHash("sha256").update(root).digest("hex").slice(0, 20);
+var key = createHash2("sha256").update(root).digest("hex").slice(0, 20);
 var bridgeFile = join(tempRoot, "discussions", `service-${key}.json`);
 var controller = new AbortController();
 var bridge;
@@ -34,9 +118,9 @@ async function rpc(path, input = {}, signal) {
   return result;
 }
 var mentionFields = {
-  replyToMessageId: { type: "string", description: "Quote one visible message from this room." },
-  mentionMemberIds: { type: "array", items: { type: "string" }, description: "Structured member IDs to notify urgently. Display names in text do not count." },
-  mentionAll: { type: "boolean", description: "Urgently notify every other agent, never the sender." }
+  replyToMessageId: { type: "string", description: "Optional. Use the messageId of a specific visible room message only when the reference matters. Omit for an ordinary follow-up or when the context is clear." },
+  mentionMemberIds: { type: "array", items: { type: "string" }, description: "Optional. To notify someone urgently, use their stable memberId from the roster or room_members. Typing @displayName in the text sends no notification." },
+  mentionAll: { type: "boolean", description: "Optional. Use only when every other agent needs an urgent notification." }
 };
 var noInput = { type: "object", properties: {}, additionalProperties: false };
 var tools = [
@@ -67,64 +151,70 @@ var tools = [
   },
   {
     name: "room_post",
-    description: "Post a short message, reply or peer question. Maximum display width 100. May return review_required without storing when recent unread messages must be read first. Sender identity comes only from this session.",
+    description: `Post a short message, reply or peer question. Each post has a maximum display width of ${MAX_AGENT_MESSAGE_WIDTH} (about ${MAX_AGENT_MESSAGE_WIDTH / 2} Chinese characters). For a longer reply, you can post separate messages in order: send the main point first, then only necessary details. Wait for each result before sending the next. If it is review_required, read the returned timeline before deciding whether to send again. Sender identity comes only from this session.`,
     input: { type: "object", properties: { text: { type: "string", minLength: 1 }, ...mentionFields }, required: ["text"], additionalProperties: false }
   },
   {
     name: "room_ask",
-    description: "Ask the human an asynchronous room question without blocking this turn. Text is open-ended; options creates a single-choice question with at least two unique options. Question and options share the 100 display-width limit.",
+    description: `Ask the human an asynchronous room question without blocking this turn. Text is open-ended; options creates a single-choice question with at least two unique options. Keep the question and its options together within ${MAX_AGENT_MESSAGE_WIDTH} display columns. If necessary, send background separately with room_post. Read the returned timeline first if the result is review_required.`,
     input: { type: "object", properties: { text: { type: "string", minLength: 1 }, options: { type: "array", minItems: 2, items: { type: "string", minLength: 1 } }, ...mentionFields }, required: ["text"], additionalProperties: false }
   },
   {
     name: "room_withdraw_question",
-    description: "Withdraw your own pending room question, or let the host withdraw it. Optional note is limited to 100 display width. Does not wake the room.",
-    input: { type: "object", properties: { questionId: { type: "string" }, note: { type: "string" }, replyToMessageId: { type: "string" }, duplicateOfQuestionId: { type: "string" } }, required: ["questionId"], additionalProperties: false }
+    description: `Withdraw your own pending room question, or let the host withdraw it. Optional note is limited to ${MAX_AGENT_MESSAGE_WIDTH} display columns. Does not wake the room.`,
+    input: { type: "object", properties: { questionId: { type: "string" }, note: { type: "string" }, replyToMessageId: mentionFields.replyToMessageId, duplicateOfQuestionId: { type: "string" } }, required: ["questionId"], additionalProperties: false }
   }
 ];
-function collectPresentationIds(value, found) {
-  if (typeof value === "string") {
-    try {
-      collectPresentationIds(JSON.parse(value), found);
-    } catch {
-      for (const match of value.matchAll(/"presentationId"\s*:\s*"(p_[a-zA-Z0-9_]+)"/g)) found.add(match[1]);
-    }
-    return;
-  }
-  if (!value || typeof value !== "object") return;
-  if (Array.isArray(value)) {
-    for (const item of value) collectPresentationIds(item, found);
-    return;
-  }
-  if (typeof value.presentationId === "string") found.add(value.presentationId);
-  for (const item of Object.values(value)) collectPresentationIds(item, found);
-}
-function extractPresentations(value, found) {
-  if (!value || typeof value !== "object") return;
-  if (Array.isArray(value)) {
-    for (const item of value) extractPresentations(item, found);
-    return;
-  }
-  const isTool = value.type === "tool" || value.type === "tool-result" || value.role === "tool" || typeof value.name === "string" && value.name.startsWith("room_");
-  if (isTool) collectPresentationIds(value.result ?? value.output ?? value.content ?? value.state?.output ?? value.state?.metadata ?? value, found);
-  for (const [key2, item] of Object.entries(value)) {
-    if (key2 !== "output" && key2 !== "content" && key2 !== "state" && key2 !== "result" && item && typeof item === "object") extractPresentations(item, found);
-  }
-}
 var index_default = {
   id: "multi-agent-discussion",
   async setup(ctx) {
+    const resultPresentations = /* @__PURE__ */ new Map();
+    function rememberResult(sessionID, key2, presentationId) {
+      resultPresentations.set(`${sessionID}:${key2}`, presentationId);
+      if (resultPresentations.size > 2048) resultPresentations.delete(resultPresentations.keys().next().value);
+    }
     await ctx.tool.transform((editor) => {
       for (const tool of tools) editor.add({ ...tool, options: { codemode: false }, execute: async (input, context) => {
         const result = await rpc("/plugin/tool", { sessionID: context.sessionID, name: tool.name, input }, context.signal);
-        return { content: JSON.stringify(result) };
+        const output = roomToolOutput(tool.name, result);
+        rememberResult(context.sessionID, roomResultKey(context.id, tool.name, output.content), output.metadata?.discussionPresentationId ?? null);
+        return output;
       } });
     });
     const candidates = /* @__PURE__ */ new Map();
     const seenPresentations = /* @__PURE__ */ new Set();
-    await ctx.session.hook("context", (event) => {
+    await ctx.session.hook("context", async (event) => {
       const found = /* @__PURE__ */ new Set();
-      extractPresentations(event.messages, found);
-      if (found.size && event.sessionID) {
+      const missing = /* @__PURE__ */ new Set();
+      for (const { key: key2, text } of roomPresentationResults(event.messages)) {
+        const id = resultPresentations.get(`${event.sessionID}:${key2}`);
+        if (id !== void 0) {
+          if (id) found.add(id);
+          continue;
+        }
+        let legacyId;
+        try {
+          legacyId = JSON.parse(text)?.presentation?.presentationId;
+        } catch {
+        }
+        if (typeof legacyId === "string") {
+          rememberResult(event.sessionID, key2, legacyId);
+          found.add(legacyId);
+        } else missing.add(key2);
+      }
+      if (missing.size) {
+        try {
+          const stored = storedRoomPresentations(await ctx.session.context({ sessionID: event.sessionID }), missing);
+          for (const key2 of missing) {
+            const id = stored.get(key2);
+            rememberResult(event.sessionID, key2, id ?? null);
+            if (id) found.add(id);
+          }
+        } catch (error) {
+          if (!controller.signal.aborted) console.error("Discussion could not read tool receipt metadata", error.message);
+        }
+      }
+      if (found.size) {
         const current = candidates.get(event.sessionID) || /* @__PURE__ */ new Set();
         for (const item of found) if (!seenPresentations.has(item)) {
           current.add(item);
@@ -143,7 +233,7 @@ var index_default = {
       events: { changed: { schema: { type: "object", properties: { roomId: { type: "string" } }, required: ["roomId"], additionalProperties: false } } }
     };
     await ctx.rpc.register(RoomRPC, {
-      health: async () => ({ plugin: "multi-agent-discussion", version: "0.1.2" }),
+      health: async () => ({ plugin: "multi-agent-discussion", version: "0.1.3" }),
       room: async (input) => rpc("/plugin/rpc/room", input)
     });
     async function publishCatalog() {

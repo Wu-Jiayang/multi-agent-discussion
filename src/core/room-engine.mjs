@@ -176,11 +176,24 @@ export class RoomEngine {
     try {
       this.store.recoverExpiredReminders(this.now());
       for (const room of this.store.listRooms()) {
-        if (room.status !== "ready") continue;
+        if (room.status !== "ready" && room.status !== "paused") continue;
         for (const member of this.store.agents(room.roomId)) {
           if (member.creation_status !== "ready") continue;
-          if (!this.store.unreadSummary(room.roomId, member.id, []).unreadCount) continue;
-          await this.recheckMember(room.roomId, member.id);
+          if (room.status === "ready" && this.store.unreadSummary(room.roomId, member.id, []).unreadCount) {
+            if (await this.recheckMember(room.roomId, member.id)) continue;
+          }
+          // Reconcile activity without inventing a turn outcome or scheduling a wake.
+          if (member.last_status !== "running" || await this.queryStatus(member) !== "idle") continue;
+          const current = this.store.member(member.id);
+          if (current.execution_round !== member.execution_round || current.last_status !== "running") continue;
+          const observed = this.store.setSessionStatus(member.session_id, "idle", this.now());
+          this.waitKinds.delete(member.session_id);
+          if (observed.changed) {
+            if (current.last_terminal_round !== current.execution_round) {
+              this.store.diagnostic("session-status-reconciled", { roomId: room.roomId, memberId: member.id, sessionId: member.session_id, status: "idle" });
+            }
+            this.changed(room.roomId);
+          }
         }
       }
     } finally {
@@ -250,8 +263,9 @@ export class RoomEngine {
   }
 
   pause(roomId, reason = "manual") {
+    const previous = this.store.room(roomId);
     const room = this.store.pauseRoom(roomId, reason, this.now());
-    this.changed(roomId);
+    if (previous.status !== room.status || previous.paused_reason !== room.pausedReason) this.changed(roomId);
     return room;
   }
 

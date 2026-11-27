@@ -32,8 +32,11 @@ members[0].wakeBackoffUntil=new Date(Date.now()+3600000).toISOString();
 members[1].modelSynced=false;
 let messages=store.history(room.roomId,{viewerMemberId:room.human.memberId,trackPresentation:false}).items;
 let questions=[{questionId:'q_1',messageId:'m_question_1',roomSeq:2,asker:members[1],createdAt:new Date().toISOString(),status:'pending',text:'选择哪种方案？',options:['甲','乙'],preview:true},{questionId:'q_2',messageId:'m_question_2',roomSeq:3,asker:members[0],createdAt:new Date().toISOString(),status:'pending',text:'第二个问题',options:[],preview:true}];
+let holdRoomRefresh = false;
+let heldRoomRequestId;
 function response(m,payload={}){dom.window.dispatchEvent(new dom.window.MessageEvent('message',{data:{channel:'openchamber.sdk',v:1,type:'result',id:m.id,ok:true,payload},source:dom.window.parent}));}
-dom=new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html',virtualConsole,beforeParse(window){
+function mountPanel() {
+ return new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html',pretendToBeVisual:true,virtualConsole,beforeParse(window){
   const NativeMessageEvent = window.MessageEvent;
   window.MessageEvent = class extends NativeMessageEvent {
     constructor(type, init = {}) { super(type, init); Object.defineProperty(this, 'source', { value: init.source ?? window.parent }); }
@@ -42,7 +45,7 @@ dom=new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html'
   parent.postMessage = message => {
     hostCalls.push({type:message.type,payload:message.payload});
     queueMicrotask(()=>{
-      if(message.type==='hello'){window.dispatchEvent(new window.MessageEvent('message',{data:{channel:'openchamber.sdk',v:1,type:'ready',payload:{theme:{mode:'dark',tokens},locale:'zh-CN',directory:'/workspace/demo',session:null,surface:'page',item:null,connection:null,settings:{},device:{formFactor:'desktop',pointer:'fine',insets:{top:0,right:0,bottom:0,left:0},keyboard:0}}},source:window.parent}));return}
+       if(message.type==='hello'){window.dispatchEvent(new window.MessageEvent('message',{data:{channel:'openchamber.sdk',v:1,type:'ready',payload:{theme:{mode:'dark',tokens},locale:'zh-CN',directory:'/workspace/demo',session:null,surface:'page',item:null,connection:null,settings:{},device:{formFactor:'desktop',pointer:'fine',insets:{top:0,right:0,bottom:0,left:0},keyboard:0}}},source:window.parent}));return}
       if(message.type==='storage'){const op=message.payload.op;response({id:message.id},{op,storage:op==='get'?{op:'get',found:false}:{op}});return}
       if(message.type==='workspace-read'){response({id:message.id},{kind:'projects',state:'ready',projects});return}
       if(message.type==='workspace-subscribe'){
@@ -61,7 +64,10 @@ dom=new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html'
           else data={models:[{providerID:'probe',id:'a',name:'模型 A',variant:'high',providerName:'Probe'},{providerID:'probe',id:'b',name:'模型 B',providerName:'Probe'}],source:'project'};
         }
         else if(p.path==='/rooms')data={rooms:[room]};
-        else if(p.path==='/rooms/'+room.roomId+'')data=room;
+        else if(p.path==='/rooms/'+room.roomId+''){
+          if (holdRoomRefresh) { heldRoomRequestId = message.id; return; }
+          data=room;
+        }
         else if(p.path==='/rooms/'+room.roomId+'/timeline')data={items:messages,previousCursor:null,nextCursor:null};
         else if(p.path.includes('/context'))data={items:messages};
         else if(p.path==='/rooms/'+room.roomId+'/questions')data=p.query?.cursor?{items:questions.slice(1),status:'pending',nextCursor:null}:{items:questions.slice(0,1),status:'pending',nextCursor:'next-page'};
@@ -70,7 +76,10 @@ dom=new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html'
         else if(p.path==='/rooms/'+room.roomId+'/messages'&&p.method==='POST'){const input=JSON.parse(p.body);const seq=room.latestSeq+1;const message={messageId:'m_new_'+seq,roomSeq:seq,author:room.human,isOwn:true,kind:'post',createdAt:new Date().toISOString(),mentions:[],mentionAll:false,replyToMessageId:input.replyToMessageId||null,questionId:null,questionStatus:null,answerMessageId:null,label:'[#'+seq+' 房主 · 人类 · 你]',text:input.text,options:[],full:true,preview:false};messages.push(message);room.latestSeq=seq;data={status:'stored',messageId:message.messageId,roomSeq:seq,timeline:messages.slice(-8)}}
         else if(p.path.includes('/answer')){questions=[];room.pendingQuestions=0;data={status:'answered',answerMessageId:'m_answer',messageId:'m_answer',roomSeq:3}}
         else if(p.path.includes('/withdraw')){const questionId=p.path.split('/')[4];questions=questions.filter(item=>item.questionId!==questionId);room.pendingQuestions=questions.length;data={status:'withdrawn',questionId}}
-        else if(p.path==='/rooms/'+room.roomId+'/end'&&p.method==='POST'){room.status='ended';room.endedAt=new Date().toISOString();data={status:'ended'}}
+         else if(p.path==='/rooms/'+room.roomId+'/end'&&p.method==='POST'){room.status='ended';room.endedAt=new Date().toISOString();data={status:'ended'}}
+         else if(p.path==='/rooms/'+room.roomId+'/pause'&&p.method==='POST'){
+           room.status='paused';room.pausedReason='manual';room.reminders=[{status:'submitting'}];data=room;
+         }
         else if(p.path.includes('/receipts'))data={messageId:'m_1',human:null,agents:[{memberId:'m_a',displayName:'提案者',kind:'agent',readAt:new Date().toISOString(),source:'model-context'}]};
         else if(p.path==='/rooms/'+room.roomId+'/read')data={marked:1,unread:{unreadCount:0,unreadMentionCount:0,unreadMentions:[]}};
         else if(p.path==='/workspace/list')data={rootPath:room.workspaceDir,path:room.workspaceDir,relativePath:'',parentPath:null,entries:[{name:'review',path:room.workspaceDir+'/review',relativePath:'review',kind:'directory',size:null,mtime:new Date().toISOString()},{name:'a.md',path:room.workspaceDir+'/a.md',relativePath:'a.md',kind:'file',size:6,mtime:new Date().toISOString()}]};
@@ -89,7 +98,9 @@ dom=new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html'
   window.HTMLDialogElement.prototype.showModal=function(){this.setAttribute('open','')};
   window.HTMLDialogElement.prototype.close=function(){this.removeAttribute('open')};
   window.confirm=()=>{nativeDialogCalls.push('confirm');return false};window.prompt=()=>{nativeDialogCalls.push('prompt');return null};
-}});
+ }});
+}
+dom=mountPanel();
 const window=dom.window;const document=window.document;
 async function waitFor(fn,label){for(let i=0;i<100;i++){if(fn())return;await new Promise(r=>setTimeout(r,20));}throw new Error('Timeout '+label+'; errors='+errors.join('\n')+'; project='+document.querySelector('#project-picker')?.textContent+'; file='+document.querySelector('#file-list')?.textContent+'; modal='+document.querySelector('#modal-content')?.textContent+'; error='+document.querySelector('#error')?.textContent)}
 function chooseSdkOption(root,labelPart){
@@ -190,12 +201,47 @@ document.querySelector('[data-action="close-modal"]').click();
 chooseSdkOption(document.querySelector('#project-picker'),'另一个项目');
 await waitFor(()=>document.querySelector('#project-picker .oc-sdk-trigger').textContent.includes('另一个项目'),'project switch');
 await waitFor(()=>serviceCalls.some(call=>call.path==='/rooms'&&call.query?.projectDir==='/workspace/other'),'rooms load for switched project');
-await waitFor(()=>document.querySelector('#room-header').textContent.includes('根会话创建失败：模拟根会话失败'),'failed root session shows its error');
+await waitFor(()=>!document.querySelector('#room-view').hidden && document.querySelector('#room-header').textContent.includes('根会话创建失败：模拟根会话失败'),'failed root session shows its error');
+const pauseButton = document.querySelector('[data-action="pause"]');
+pauseButton.click();
+await waitFor(() => document.querySelector('[data-action="pause"]')?.disabled || document.querySelector('[data-action="resume"]'), 'pause button is disabled or replaced');
+await waitFor(() => document.querySelector('#room-header').textContent.includes('1 次唤醒正在提交'), 'paused room reports a submission in flight');
+assert.match(document.querySelector('#room-header').textContent, /1 位成员仍在运行/);
+room.reminders = [];
+members[1].sessionStatus = 'idle';
+emitRoomChanged();
+await waitFor(() => !document.querySelector('#room-header').textContent.includes('仍在运行'), 'paused room clears completed activity');
 room.status='paused';room.pausedReason='provider-quota';
-window.dispatchEvent(new window.MessageEvent('message',{data:{channel:'openchamber.sdk',v:1,type:'service-event',payload:{topic:'room:changed'}},source:window.parent}));
+function emitRoomChanged() {
+  window.dispatchEvent(new window.MessageEvent('message',{data:{channel:'openchamber.sdk',v:1,type:'service-event',payload:{topic:'room:changed'}},source:window.parent}));
+}
+emitRoomChanged();
 await waitFor(()=>document.querySelector('#room-header').textContent.includes('模型额度或余额不足，自动唤醒已暂停。充值或更换模型后点击继续房间。'),'provider quota hint');
 assert.ok([...document.querySelectorAll('#room-header .composer-hint')].some(hint=>hint.classList.contains('provider-quota')&&hint.textContent.includes('模型额度或余额不足')),'provider quota hint is highlighted');
 assert.ok(document.querySelector('[data-action="resume"]'),'provider quota still offers the existing resume action');
+
+holdRoomRefresh = true;
+emitRoomChanged();
+await waitFor(() => heldRoomRequestId, 'background refresh request');
+const roomReadCount = () => serviceCalls.filter(call => call.path === `/rooms/${room.roomId}` && call.method === 'GET').length;
+const readsBeforeTimeout = roomReadCount();
+emitRoomChanged();
+await new Promise(resolve => setTimeout(resolve, 1900));
+assert.equal(roomReadCount(), readsBeforeTimeout, 'events and polling cannot overlap an in-flight refresh');
+holdRoomRefresh = false;
+window.dispatchEvent(new window.MessageEvent('message', {
+  data: { channel: 'openchamber.sdk', v: 1, type: 'result', id: heldRoomRequestId, ok: false, code: 'HOST_TIMEOUT', error: 'Host did not answer in time.' },
+  source: window.parent,
+}));
+await waitFor(() => !document.querySelector('#refresh-error').hidden, 'temporary refresh failure appears');
+emitRoomChanged();
+await new Promise(resolve => setTimeout(resolve, 200));
+assert.equal(roomReadCount(), readsBeforeTimeout, 'room events respect the backoff');
+await new Promise(resolve => setTimeout(resolve, 3600));
+emitRoomChanged();
+await waitFor(() => document.querySelector('#refresh-error').hidden, 'successful retry clears the refresh notice');
+assert.ok(roomReadCount() > readsBeforeTimeout);
+
 document.querySelector('[data-action="end"]').click();
 await waitFor(()=>document.querySelector('#modal').hasAttribute('open')&&document.querySelector('[data-action="confirm-end-room"]'),'end confirmation modal');
 assert.equal(serviceCalls.some(call=>call.path==='/rooms/'+room.roomId+'/end'),false,'opening end confirmation does not end the room');
@@ -213,6 +259,6 @@ await waitFor(()=>document.querySelector('#model-source-hint').textContent.inclu
 assert.ok(serviceCalls.some(call=>call.path==='/models'&&call.query?.directory==='/workspace/other'),'models reload for switched project');
 assert.deepEqual(errors,[]);
 console.log('PASS panel DOM smoke: project picker, SDK model picker, member model change, failure pills, provider quota hint, create form, role defaults, question answer, withdraw/end dialogs, composer, receipts modal, global fallback');
-window.close();
-store.close();
+ window.close();
+ store.close();
 rmSync(panelRoot,{recursive:true,force:true});

@@ -2740,6 +2740,7 @@ ${GUEST_UI_LOOK_CSS}`;
   var host = connectHost();
   var $ = (selector) => document.querySelector(selector);
   var app = $("#app");
+  var pausingRooms = /* @__PURE__ */ new Set();
   var state = {
     directory: null,
     projectDir: null,
@@ -2816,7 +2817,14 @@ ${GUEST_UI_LOOK_CSS}`;
     $("#error").hidden = true;
   }
   async function request(method, path, body, query) {
-    const result = await host.serviceRequest({ method, path, query: query && Object.fromEntries(Object.entries(query).filter(([, value]) => value != null && value !== "").map(([key, value]) => [key, String(value)])), body: body == null ? void 0 : JSON.stringify(body) });
+    const startedAt = performance.now();
+    let result;
+    try {
+      result = await host.serviceRequest({ method, path, query: query && Object.fromEntries(Object.entries(query).filter(([, value]) => value != null && value !== "").map(([key, value]) => [key, String(value)])), body: body == null ? void 0 : JSON.stringify(body) });
+    } catch (error) {
+      console.warn("[discussion] host request failed", { method, path, elapsedMs: Math.round(performance.now() - startedAt), code: error?.code });
+      throw error;
+    }
     let data = null;
     try {
       data = result.body ? JSON.parse(result.body) : null;
@@ -2999,7 +3007,7 @@ ${GUEST_UI_LOOK_CSS}`;
   }
   function pausedReasonText(room) {
     if (room.pausedReason === "provider-quota") return "\u6A21\u578B\u989D\u5EA6\u6216\u4F59\u989D\u4E0D\u8DB3\uFF0C\u81EA\u52A8\u5524\u9192\u5DF2\u6682\u505C\u3002\u5145\u503C\u6216\u66F4\u6362\u6A21\u578B\u540E\u70B9\u51FB\u7EE7\u7EED\u623F\u95F4\u3002";
-    return `\u81EA\u52A8\u5524\u9192\u5DF2\u6682\u505C\uFF08${room.pausedReason === "budget" ? "\u989D\u5EA6\u7528\u5C3D" : "\u624B\u52A8\u6682\u505C"}\uFF09\u3002\u53D1\u5E16\u3001\u9605\u8BFB\u548C\u63D0\u95EE\u4ECD\u53EF\u4F7F\u7528\u3002`;
+    return `\u81EA\u52A8\u5524\u9192\u5DF2\u6682\u505C\uFF08${room.pausedReason === "budget" ? "\u989D\u5EA6\u7528\u5C3D" : "\u624B\u52A8\u6682\u505C"}\uFF09\u3002\u5DF2\u63D0\u4EA4\u7684\u5524\u9192\u548C\u6B63\u5728\u8FD0\u884C\u7684\u56DE\u5408\u4ECD\u4F1A\u7EE7\u7EED\u3002\u53D1\u5E16\u3001\u9605\u8BFB\u548C\u63D0\u95EE\u4ECD\u53EF\u4F7F\u7528\u3002`;
   }
   function modelSelectOptions() {
     return state.models.map((model) => ({
@@ -3285,18 +3293,23 @@ ${GUEST_UI_LOOK_CSS}`;
     const room = state.room;
     if (!room) return;
     const paused = room.status === "paused";
+    const pausing = pausingRooms.has(room.roomId);
+    const running = room.members.filter((member) => member.sessionStatus === "running").length;
+    const submitting = room.reminders?.filter((reminder) => reminder.status === "submitting").length || 0;
+    const remainingActivity = [running ? `${running} \u4F4D\u6210\u5458\u4ECD\u5728\u8FD0\u884C` : "", submitting ? `${submitting} \u6B21\u5524\u9192\u6B63\u5728\u63D0\u4EA4` : ""].filter(Boolean).join("\uFF0C");
     const rootStatus = room.rootCreationStatus;
     const rootPill = rootStatus === "ready" ? "running" : rootStatus === "failed" ? "unknown" : "waiting-human";
-    const rootChip = rootStatus || room.rootSessionId ? `<span class="member-chip root-session"><span>\u6839\u4F1A\u8BDD</span>${rootStatus ? `<span class="pill ${rootPill}">${escape(rootStatusLabels[rootStatus] || rootStatus)}</span>` : ""}${room.rootSessionId ? `<button data-action="open-root-session" data-session="${escape(room.rootSessionId)}">\u4F1A\u8BDD\u7EC4</button>` : ""}</span>` : "";
+    const rootChip = rootStatus || room.rootSessionId ? `<span class="member-chip root-session"><span>\u6839\u4F1A\u8BDD</span>${rootStatus ? `<span class="pill ${rootPill}">${escape(rootStatusLabels[rootStatus] || rootStatus)}</span>` : ""}${room.rootSessionId ? `<button data-action="open-root-session" data-session="${escape(room.rootSessionId)}">\u67E5\u770B\u6839\u4F1A\u8BDD</button>` : ""}</span>` : "";
     $("#room-header").innerHTML = `
     <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">\u4EBA\u7C7B \xB7 \u623F\u4E3B</span></span>${room.members.map((member) => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">\u521B\u5EFA\u5931\u8D25\uFF1A${escape(member.creationError || "\u672A\u77E5\u539F\u56E0")}</span>` : `${member.taskError ? `<span class="pill waiting-human">\u4F1A\u8BDD\u540C\u6B65\u5931\u8D25\uFF1A${escape(member.taskError)}</span>` : ""}${memberIssuePills(member)}<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">\u4F1A\u8BDD</button>` : ""}<button data-action="change-model" data-member="${escape(member.memberId)}">\u6362\u6A21\u578B</button></span>`).join("")}</div></div>
     <div class="room-controls">
       <button class="button ghost" data-action="open-workspace">\u6587\u4EF6</button>
       <span class="pill budget">\u4F59\u989D ${room.budget.remaining}/${room.budget.limit} \xB7 \u7B2C ${room.budget.period} \u6BB5</span>
-      ${room.status === "creating" ? `<button class="button secondary" data-action="retry">\u91CD\u8BD5\u7F3A\u5931\u4F1A\u8BDD</button>` : room.status !== "ended" ? `${paused ? `<button class="button primary" data-action="resume">\u7EE7\u7EED\u623F\u95F4</button>` : `<button class="button secondary" data-action="pause">\u6682\u505C\u5524\u9192</button>`}<button class="button ghost danger" data-action="end">\u7ED3\u675F\u623F\u95F4</button>` : ""}
+      ${room.status === "creating" ? `<button class="button secondary" data-action="retry">\u91CD\u8BD5\u7F3A\u5931\u4F1A\u8BDD</button>` : room.status !== "ended" ? `${paused ? `<button class="button primary" data-action="resume">\u7EE7\u7EED\u623F\u95F4</button>` : `<button class="button secondary" data-action="pause"${pausing ? " disabled" : ""}>${pausing ? "\u6B63\u5728\u6682\u505C\u2026" : "\u6682\u505C\u5524\u9192"}</button>`}<button class="button ghost danger" data-action="end">\u7ED3\u675F\u623F\u95F4</button>` : ""}
     </div>
     ${rootStatus === "failed" ? `<div class="root-error">\u6839\u4F1A\u8BDD\u521B\u5EFA\u5931\u8D25\uFF1A${escape(room.rootCreationError || "\u672A\u77E5\u539F\u56E0")}</div>` : ""}
     ${paused && room.status !== "creating" ? `<div class="composer-hint${room.pausedReason === "provider-quota" ? " provider-quota" : ""}">${escape(pausedReasonText(room))}</div>` : ""}
+    ${paused && remainingActivity ? `<div class="composer-hint">${escape(remainingActivity)}\u3002</div>` : ""}
   `;
   }
   function renderAuthorFilter() {
@@ -3333,7 +3346,9 @@ ${GUEST_UI_LOOK_CSS}`;
     const own = message.isOwn ? "own" : "";
     const anchor = state.chatAnchor === message.messageId ? "anchor" : "";
     const question = message.questionId ? `<div class="question-card"><span class="pill">\u95EE\u9898 \xB7 ${escape(message.questionStatus || "pending")}</span>${message.options?.length ? `<ol class="options">${message.options.map((option) => `<li>${escape(option)}</li>`).join("")}</ol>` : ""}${message.answerMessageId ? `<button class="button ghost" data-action="open-message" data-message="${escape(message.answerMessageId)}">\u6253\u5F00\u7B54\u6848</button>` : ""}</div>` : "";
-    const quote = message.replyTo ? `<div class="quote" data-action="open-message" data-message="${escape(message.replyTo.messageId)}" ${message.replyTo.full ? `data-full-message-id="${escape(message.replyTo.messageId)}"` : ""}><div class="quote-label">${escape(message.replyTo.label)}</div><div class="quote-text">${renderText(message.replyTo.text || "\u539F\u5E16\u4E0D\u53EF\u7528\u6216\u5DF2\u5220\u9664\u3002")}</div></div>` : "";
+    const reply = message.replyTo;
+    const quoteText = reply?.text?.replace(/\s+/g, " ").trim() || "\u539F\u5E16\u4E0D\u53EF\u7528\u6216\u5DF2\u5220\u9664\u3002";
+    const quote = !reply ? "" : reply.unavailable ? `<span class="quote">${escape(quoteText)}</span>` : `<button type="button" class="quote" data-action="open-message" data-message="${escape(reply.messageId)}"><span class="quote-text">${escape(`${reply.author.displayName}\uFF1A${quoteText}`)}</span></button>`;
     const mentions = message.mentions?.length || message.mentionAll ? `<span class="mentions">${message.mentionAll ? `<span class="mention">@\u6240\u6709\u4EBA</span>` : ""}${(message.mentions || []).map((member) => `<span class="mention">@${escape(member.display_name)}</span>`).join("")}</span>` : "";
     return `<article class="message ${message.author.kind} ${own} ${anchor}" data-message-row="${escape(message.messageId)}">
     <div class="avatar">${escape(message.author.displayName.slice(0, 1))}</div>
@@ -3906,12 +3921,25 @@ ${GUEST_UI_LOOK_CSS}`;
         showEndRoomConfirmation();
         return;
       }
+      const roomId = state.roomId;
+      if (!roomId || state.room?.roomId !== roomId) return;
+      if (action === "pause") {
+        if (pausingRooms.has(roomId)) return;
+        pausingRooms.add(roomId);
+        renderRoomHeader();
+      }
       try {
-        await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/${action}`, action === "resume" ? { budgetLimit: state.room?.budget.limit || 50 } : void 0);
+        await request("POST", `/rooms/${encodeURIComponent(roomId)}/${action}`, action === "resume" ? { budgetLimit: state.room?.budget.limit || 50 } : void 0);
+        if (state.roomId !== roomId) return;
         await refreshRoom();
         if (action === "resume") await loadTimeline(true);
       } catch (error) {
-        showError(error);
+        if (state.roomId === roomId) showError(error);
+      } finally {
+        if (action === "pause") {
+          pausingRooms.delete(roomId);
+          if (state.roomId === roomId) renderRoomHeader();
+        }
       }
       return;
     }
@@ -4133,19 +4161,44 @@ ${GUEST_UI_LOOK_CSS}`;
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") hideMentionMenu();
   });
-  var refreshTimer = 0;
+  var REFRESH_INTERVAL_MS = 1800;
+  var MAX_REFRESH_BACKOFF_MS = 3e4;
+  var roomRefresh = null;
   async function refreshOpenRoom() {
-    if (document.hidden || !state.projectDir && !state.roomId) return;
-    clearTimeout(refreshTimer);
+    if (document.hidden) return;
+    const roomId = state.creating ? null : state.roomId;
+    const generation = state.contextGeneration;
+    if (roomRefresh?.roomId !== roomId || roomRefresh?.generation !== generation) {
+      clearTimeout(roomRefresh?.timer);
+      roomRefresh = roomId ? { roomId, generation, timer: null, running: false, failures: 0, retryAt: 0 } : null;
+      $("#refresh-error").hidden = true;
+    }
+    if (!state.projectDir && !roomId) return;
     if (!state.models.length && !state.modelsLoading && state.modelsForProject !== state.projectDir) await refreshModels(false);
-    if (!state.roomId || state.creating) return;
-    refreshTimer = setTimeout(async () => {
+    const refresh = roomRefresh;
+    if (!refresh || refresh.roomId !== roomId || refresh.generation !== generation || refresh.timer !== null || refresh.running || Date.now() < refresh.retryAt) return;
+    const isCurrent = () => roomRefresh === refresh && state.roomId === roomId && state.contextGeneration === generation && !state.creating;
+    refresh.timer = setTimeout(async () => {
+      refresh.timer = null;
+      if (!isCurrent() || document.hidden) return;
+      refresh.running = true;
       try {
         await refreshRoom();
+        if (!isCurrent()) return;
         if (!state.chatAnchor && state.followLatest) await loadTimeline();
+        if (!isCurrent()) return;
         await loadQuestions();
-      } catch (error) {
-        showError(error);
+        if (!isCurrent()) return;
+        refresh.failures = 0;
+        refresh.retryAt = 0;
+        $("#refresh-error").hidden = true;
+      } catch {
+        if (!isCurrent()) return;
+        refresh.failures += 1;
+        refresh.retryAt = Date.now() + Math.min(MAX_REFRESH_BACKOFF_MS, REFRESH_INTERVAL_MS * 2 ** refresh.failures);
+        $("#refresh-error").hidden = false;
+      } finally {
+        refresh.running = false;
       }
     }, 80);
   }
@@ -4153,7 +4206,7 @@ ${GUEST_UI_LOOK_CSS}`;
     if (event.topic === "room:changed") void refreshOpenRoom();
     if (event.topic === "models:changed") void refreshModels(true);
   });
-  setInterval(() => void refreshOpenRoom(), 1800);
+  setInterval(() => void refreshOpenRoom(), REFRESH_INTERVAL_MS);
   mountProjectPicker();
   var readyGeneration = 0;
   host.onReady(async (ctx) => {
