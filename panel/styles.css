@@ -31,13 +31,15 @@ textarea { resize: vertical; }
 .app-header { min-height: 54px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .brand { display: flex; align-items: center; gap: 9px; white-space: nowrap; }
 .brand-mark { font-size: 24px; color: var(--primary); }
-.project-picker-wrap { display: flex; align-items: center; gap: 8px; flex: 1 1 240px; max-width: 460px; min-width: 0; }
+.project-picker-wrap { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; max-width: 460px; margin-bottom: 16px; }
 .project-picker { flex: 1 1 180px; min-width: 0; }
 .project-picker .oc-sdk-select, .model-picker .oc-sdk-select { width: 100%; }
 .project-picker .oc-sdk-trigger, .model-picker .oc-sdk-trigger { width: 100%; }
 .project-hint { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
-.header-actions { display: flex; gap: 8px; min-width: 0; }
-.header-actions select { max-width: 280px; }
+.header-actions { display: flex; align-items: end; gap: 8px; min-width: 0; }
+.room-select { width: min(280px, 45vw); min-width: 0; }
+.room-select .oc-sdk-trigger { width: 100%; }
+#retry-rooms { align-self: start; margin: 10px 16px; }
 .error { margin: 10px 16px 0; padding: 10px 12px; border: 1px solid var(--error); border-radius: var(--radius); color: var(--error); white-space: pre-wrap; }
 .create-view { overflow: auto; padding: 24px; max-width: 980px; width: 100%; margin: 0 auto; }
 .create-view h1 { margin: 0 0 6px; font-size: 24px; }
@@ -140,9 +142,7 @@ dialog.file-browser-dialog { max-width: 1100px; width: calc(100% - 32px); }
 @media (max-width: 760px) {
   .app-header { padding: 8px 10px; }
   .brand strong { font-size: 13px; }
-  .project-picker-wrap { order: 3; flex: 1 1 100%; max-width: none; }
   .project-hint { flex: 1 1 100%; }
-  .header-actions select { max-width: 130px; }
   .room-view { display: block; position: relative; }
   .chat-pane, .question-pane { position: absolute; inset: 0 0 46px; }
   .question-pane { display: none; border-left: 0; }

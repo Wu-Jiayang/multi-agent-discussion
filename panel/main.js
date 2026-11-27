@@ -2760,6 +2760,7 @@ ${GUEST_UI_LOOK_CSS}`;
     room: null,
     roomId: null,
     creating: false,
+    returnRoomId: null,
     createAgents: [],
     createHumanName: "\u623F\u4E3B",
     timeline: [],
@@ -2784,7 +2785,6 @@ ${GUEST_UI_LOOK_CSS}`;
     mobilePane: "chat",
     chatScroll: 0,
     questionScroll: 0,
-    pendingView: null,
     loading: false,
     generation: 0
   };
@@ -2853,11 +2853,32 @@ ${GUEST_UI_LOOK_CSS}`;
     viewPersistTimer = setTimeout(persistView, 200);
   }
   function renderRoomSelect() {
-    const select = $("#room-select");
-    select.innerHTML = `<option value="">\u9009\u62E9\u8BA8\u8BBA\u5BA4</option>${state.rooms.map((room) => `<option value="${escape(room.roomId)}">${escape(room.title)} \xB7 ${escape(room.status === "ready" ? "\u8FDB\u884C\u4E2D" : room.status === "paused" ? "\u5DF2\u6682\u505C" : room.status === "ended" ? "\u5DF2\u7ED3\u675F" : "\u521B\u5EFA\u4E2D")}</option>`).join("")}`;
-    select.value = state.roomId || "";
-    $("#new-room").textContent = state.creating ? "\u53D6\u6D88\u65B0\u5EFA" : "\u65B0\u5EFA\u623F\u95F4";
+    const projects = new Map(state.projects.map((project) => [project.directory, project.name]));
+    const status = { ready: "\u8FDB\u884C\u4E2D", paused: "\u5DF2\u6682\u505C", ended: "\u5DF2\u7ED3\u675F", creating: "\u521B\u5EFA\u4E2D" };
+    roomSelectHandle.update({
+      value: state.roomId,
+      disabled: !state.rooms.length,
+      options: state.rooms.map((room) => ({
+        id: room.roomId,
+        label: `${room.title} \xB7 ${projects.get(room.projectDir) || room.projectDir}`,
+        hint: status[room.status]
+      }))
+    });
+    $("#new-room").textContent = state.creating && state.rooms.length ? "\u53D6\u6D88\u65B0\u5EFA" : "\u65B0\u5EFA\u623F\u95F4";
+    $("#new-room").hidden = state.creating && !state.rooms.length;
   }
+  var roomSelectHandle = mountSelect($("#room-select"), {
+    label: "\u8BA8\u8BBA\u5BA4",
+    value: null,
+    options: [],
+    placeholder: "\u9009\u62E9\u8BA8\u8BBA\u5BA4",
+    searchable: true,
+    searchPlaceholder: "\u641C\u7D22\u623F\u95F4\u6216\u9879\u76EE",
+    disabled: true,
+    onChange: (roomId) => {
+      if (roomId !== state.roomId || $("#room-view").hidden) void selectRoom(roomId).catch(showError);
+    }
+  });
   var projectSelectHandle = null;
   var projectsLoaded = false;
   var projectsSubscribed = false;
@@ -2882,10 +2903,10 @@ ${GUEST_UI_LOOK_CSS}`;
     let option = state.projectId ? options.find((item) => item.id === state.projectId) : null;
     if (!option && state.projectManual) state.projectManual = false;
     if (!option) {
-      option = options.find((item) => item.directory === state.projectDir) || (state.directory ? options.find((item) => item.directory === state.directory) : null) || (state.directory ? options.find((item) => item.id === "current-workspace") : null) || null;
+      option = options.find((item) => item.directory === state.projectDir) || (!state.roomId && state.directory ? options.find((item) => item.directory === state.directory) : null) || (state.directory ? options.find((item) => item.id === "current-workspace") : null) || null;
     }
     state.projectId = option?.id || null;
-    state.projectDir = option?.directory ?? state.directory ?? null;
+    state.projectDir = option?.directory ?? state.projectDir ?? state.directory ?? null;
   }
   function renderProjectHint() {
     const el2 = $("#project-hint");
@@ -2926,7 +2947,11 @@ ${GUEST_UI_LOOK_CSS}`;
     state.projects = nextProjects;
     resolveProjectSelection();
     updateProjectPicker();
-    if (state.projectDir !== previousDir) void reloadProjectContext();
+    if (state.rooms.length) renderRoomSelect();
+    if (state.creating && state.projectDir !== previousDir) {
+      renderCreate();
+      void refreshModels(true);
+    }
   }
   async function loadProjects() {
     try {
@@ -2970,8 +2995,11 @@ ${GUEST_UI_LOOK_CSS}`;
     const changed = state.projectDir !== option.directory;
     state.projectDir = option.directory;
     projectSelectHandle?.update({ value: id });
-    if (changed) void reloadProjectContext();
-    else updateProjectPicker();
+    updateProjectPicker();
+    if (changed) {
+      renderCreate();
+      void refreshModels(true);
+    }
   }
   function modelKey(model) {
     return model ? JSON.stringify([model.providerID, model.id, model.variant || ""]) : "";
@@ -3098,6 +3126,7 @@ ${GUEST_UI_LOOK_CSS}`;
     state.modelsLoading = true;
     state.modelError = null;
     renderModelSourceHint();
+    updateCreateActions();
     try {
       const catalog = await request("GET", "/models", null, state.projectDir ? { directory: state.projectDir } : null);
       if (generation !== state.contextGeneration || requestGeneration !== state.modelsRequestGeneration) return;
@@ -3122,19 +3151,22 @@ ${GUEST_UI_LOOK_CSS}`;
     renderModelSourceHint();
   }
   function showCreate() {
+    if (!state.creating) state.returnRoomId = state.roomId;
     state.creating = true;
+    state.contextGeneration += 1;
     state.roomId = null;
     state.room = null;
     $("#create-view").hidden = false;
     $("#room-view").hidden = true;
+    $("#room-loading").hidden = true;
+    $("#retry-rooms").hidden = true;
     renderRoomSelect();
     renderCreate();
     void refreshModels(true);
   }
-  function hideCreate() {
-    state.creating = false;
-    $("#create-view").hidden = true;
-    renderRoomSelect();
+  async function cancelCreate() {
+    const room = state.rooms.find((room2) => room2.roomId === state.returnRoomId) || state.rooms[0];
+    if (room) await selectRoom(room.roomId);
   }
   function defaultName(role, index, rows) {
     const base = role === "generic" ? `Agent ${index + 1}` : roleLabels[role];
@@ -3145,7 +3177,7 @@ ${GUEST_UI_LOOK_CSS}`;
   function renderCreate() {
     disposeModelHandles();
     const preset = state.createPreset || "generic";
-    $("#create-view").innerHTML = `
+    $("#create-form").innerHTML = `
     <h1>\u65B0\u5EFA\u8BA8\u8BBA\u5BA4</h1>
     <p class="intro">\u6BCF\u4E2A\u623F\u95F4\u521B\u5EFA\u4E00\u4E2A\u6839\u4F1A\u8BDD\uFF1B\u6210\u5458\u4F1A\u8BDD\u663E\u793A\u5728\u6839\u4F1A\u8BDD\u4E0B\u65B9\uFF0C\u4E5F\u53EF\u4ECE\u6210\u5458\u201C\u4F1A\u8BDD\u201D\u6309\u94AE\u6253\u5F00\u3002\u5EFA\u623F\u672C\u8EAB\u4E0D\u4F1A\u8C03\u7528\u6A21\u578B\u3002</p>
     <div class="form-grid">
@@ -3166,7 +3198,7 @@ ${GUEST_UI_LOOK_CSS}`;
     <button class="button secondary" data-action="add-agent">\u6DFB\u52A0\u6210\u5458</button>
     <div class="warning">\u65B0\u4F1A\u8BDD\u4F7F\u7528\u6240\u9009\u9879\u76EE\u5DE5\u4F5C\u533A\uFF0C\u9ED8\u8BA4\u5B8C\u5168\u6267\u884C\u6743\u9650\uFF0C\u5E76\u5728\u4F1A\u8BDD\u7EA7\u7981\u7528\u539F\u751F\u63D0\u95EE\u5DE5\u5177\u3002\u591A\u4E2A Agent \u540C\u65F6\u5199\u540C\u4E00\u5DE5\u4F5C\u533A\u53EF\u80FD\u4E92\u76F8\u8986\u76D6\u6587\u4EF6\uFF1B\u8BA8\u8BBA\u6587\u6863\u8BF7\u5199\u623F\u95F4\u4E34\u65F6\u76EE\u5F55\u3002\u4E0D\u4F1A\u4FEE\u6539\u5168\u5C40\u6743\u9650\uFF0C\u4E0D\u521B\u5EFA worktree\u3002</div>
     <div id="model-source-hint" class="model-source-hint" hidden></div>
-    <div id="create-actions" class="create-actions"><button class="button primary" data-action="create-room" disabled>\u521B\u5EFA\u623F\u95F4</button><button class="button secondary" data-action="cancel-create">\u53D6\u6D88</button></div>
+    <div id="create-actions" class="create-actions"><button class="button primary" data-action="create-room" disabled>\u521B\u5EFA\u623F\u95F4</button>${state.rooms.length ? '<button class="button secondary" data-action="cancel-create">\u53D6\u6D88</button>' : ""}</div>
     ${!state.projectDir ? `<p class="intro">\u8BF7\u5148\u9009\u62E9\u623F\u95F4\u6240\u5C5E\u9879\u76EE\u3002</p>` : ""}
   `;
     mountCreateModelPickers();
@@ -3185,59 +3217,30 @@ ${GUEST_UI_LOOK_CSS}`;
       return row;
     });
   }
-  async function reloadProjectContext() {
-    const generation = ++state.contextGeneration;
-    state.pendingView = null;
-    state.rooms = [];
-    state.room = null;
-    state.roomId = null;
-    state.timeline = [];
-    state.timelineCursor = null;
-    state.timelineSignature = "";
-    state.questions = [];
-    state.questionSignature = "";
-    state.questionFirstSignature = "";
-    state.questionCursor = null;
-    state.selectedQuestionId = null;
-    state.chatAnchor = null;
-    state.followLatest = true;
-    state.models = [];
-    state.modelsForProject = void 0;
-    state.modelSource = null;
-    state.modelError = null;
-    state.modelsLoading = false;
-    renderRoomSelect();
-    $("#room-view").hidden = true;
-    if (!state.creating) {
-      $("#create-view").hidden = false;
-      renderCreate();
-    }
-    if (!state.projectDir) {
-      await refreshModels(true, generation);
-      return;
-    }
-    await Promise.all([refreshModels(true, generation), loadRooms(null, generation)]);
-  }
-  async function loadRooms(preferred, generation = state.contextGeneration) {
-    const data = await request("GET", "/rooms", null, { projectDir: state.projectDir });
+  async function loadRooms(preferred, savedView) {
+    const generation = state.contextGeneration;
+    const [data, restore] = await Promise.all([request("GET", "/rooms"), savedView]);
     if (generation !== state.contextGeneration) return;
-    state.rooms = data.rooms;
-    const requested = preferred || state.roomId;
-    let next = state.rooms.some((room) => room.roomId === requested) ? requested : state.rooms[0]?.roomId || null;
-    if (state.creating) next = null;
+    state.rooms = data.rooms.sort((a, b) => Number(b.projectDir === state.directory) - Number(a.projectDir === state.directory));
+    const requested = preferred || state.roomId || restore?.roomId;
+    const next = state.rooms.find((room) => room.roomId === requested) || state.rooms[0];
     renderRoomSelect();
-    if (next && state.rooms.some((room) => room.roomId === next)) await selectRoom(next, state.pendingView, generation);
-    else if (!state.creating) {
-      state.room = null;
-      state.roomId = null;
-      $("#create-view").hidden = false;
-      $("#room-view").hidden = true;
-      renderCreate();
-    }
+    if (next && !state.creating) await selectRoom(next.roomId, restore);
+    else if (!state.creating) showCreate();
   }
-  async function selectRoom(roomId, restore = null, generation = state.contextGeneration) {
-    if (!roomId) return;
+  async function selectRoom(roomId, restore = null) {
+    const selected = state.rooms.find((room) => room.roomId === roomId);
+    if (!selected) return;
+    const generation = ++state.contextGeneration;
+    clearError();
+    state.projectDir = selected.projectDir;
+    state.projectId = projectOptions().find((project) => project.directory === state.projectDir)?.id || null;
+    state.projectManual = false;
+    updateProjectPicker();
     const view = restore?.roomId === roomId ? restore : null;
+    if (view?.questionStatus) state.questionStatus = view.questionStatus;
+    if (view?.mobilePane) state.mobilePane = view.mobilePane;
+    state.room = null;
     state.roomId = roomId;
     state.creating = false;
     state.chatAnchor = view?.chatAnchor || null;
@@ -3254,20 +3257,44 @@ ${GUEST_UI_LOOK_CSS}`;
     state.mentionAll = false;
     state.composerDraft = view?.composerDraft || "";
     state.composerDraftRestored = !!view;
-    state.pendingView = null;
+    state.questions = [];
+    state.questionScroll = view?.questionScroll || 0;
     $("#create-view").hidden = true;
-    $("#room-view").hidden = false;
+    $("#room-view").hidden = true;
+    $("#room-loading").hidden = false;
+    $("#retry-rooms").hidden = true;
     $("#room-view").dataset.mobilePane = state.mobilePane;
     $("#question-status").value = state.questionStatus;
     document.querySelectorAll(".mobile-tabs button").forEach((button2) => button2.classList.toggle("active", button2.dataset.pane === state.mobilePane));
     $("#history-search").value = state.search;
     renderRoomSelect();
-    await Promise.all([refreshRoom(), loadQuestions()]);
+    $("#question-list").innerHTML = '<div class="empty" role="status">\u6B63\u5728\u8BFB\u53D6\u95EE\u9898\u2026</div>';
+    $("#pending-count").textContent = "\u2014";
+    const chat = Promise.all([
+      refreshRoom(),
+      state.chatAnchor ? loadTimeline(false, null, state.chatAnchor) : loadTimeline(true)
+    ]);
+    void loadQuestions().then(() => {
+      if (generation === state.contextGeneration && view?.questionScroll) {
+        $("#question-list").scrollTop = view.questionScroll;
+      }
+    }).catch(() => {
+      if (generation !== state.contextGeneration || state.questionFirstSignature) return;
+      $("#question-list").innerHTML = '<div class="empty" role="status">\u6682\u65F6\u65E0\u6CD5\u8BFB\u53D6\u95EE\u9898\uFF0C\u6B63\u5728\u91CD\u8BD5\u3002</div>';
+    });
+    void refreshModels(false, generation);
+    try {
+      await chat;
+    } catch (error) {
+      if (generation !== state.contextGeneration) return;
+      $("#retry-rooms").hidden = false;
+      throw error;
+    } finally {
+      if (generation === state.contextGeneration) $("#room-loading").hidden = true;
+    }
     if (generation !== state.contextGeneration) return;
-    if (state.chatAnchor) await loadTimeline(false, null, state.chatAnchor);
-    else await loadTimeline(true);
-    if (generation !== state.contextGeneration) return;
-    if (view?.questionScroll) $("#question-list").scrollTop = view.questionScroll;
+    $("#room-view").hidden = false;
+    if (state.questionFirstSignature && view?.questionScroll) $("#question-list").scrollTop = view.questionScroll;
     if (view?.chatScroll) $("#timeline").scrollTop = view.chatScroll;
     renderComposer();
     renderAuthorFilter();
@@ -3276,9 +3303,16 @@ ${GUEST_UI_LOOK_CSS}`;
   async function refreshRoom() {
     if (!state.roomId) return;
     const roomId = state.roomId;
+    const generation = state.contextGeneration;
     const room = await request("GET", `/rooms/${encodeURIComponent(roomId)}`);
-    if (state.roomId !== roomId) return;
+    if (state.roomId !== roomId || generation !== state.contextGeneration) return;
+    const listed = state.rooms.find((item) => item.roomId === roomId);
+    if (listed && listed.status !== room.status) {
+      listed.status = room.status;
+      renderRoomSelect();
+    }
     state.room = room;
+    $("#pending-count").textContent = String(room.pendingQuestions || 0);
     renderRoomHeader();
     renderAuthorFilter();
     const ready = state.room.status === "ready";
@@ -3376,10 +3410,11 @@ ${GUEST_UI_LOOK_CSS}`;
   async function loadTimeline(initial = false, cursor = null, contextId = null) {
     if (!state.roomId) return;
     const roomId = state.roomId;
+    const generation = state.contextGeneration;
     let data;
     if (contextId) data = await request("GET", `/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(contextId)}/context`, null, { before: 5, after: 8 });
     else data = await request("GET", `/rooms/${encodeURIComponent(roomId)}/timeline`, null, { cursor, limit: 50, query: state.search, authorMemberId: state.author });
-    if (state.roomId !== roomId) return;
+    if (state.roomId !== roomId || generation !== state.contextGeneration) return;
     const signature = JSON.stringify(data.items);
     if (!cursor && !contextId && signature === state.timelineSignature && !initial) return;
     state.timelineSignature = signature;
@@ -3466,8 +3501,10 @@ ${GUEST_UI_LOOK_CSS}`;
   async function loadQuestions(append = false) {
     if (!state.roomId) return;
     const roomId = state.roomId;
-    const data = await request("GET", `/rooms/${encodeURIComponent(roomId)}/questions`, null, { status: state.questionStatus, limit: 50, cursor: append ? state.questionCursor : null });
-    if (state.roomId !== roomId) return;
+    const generation = state.contextGeneration;
+    const status = state.questionStatus;
+    const data = await request("GET", `/rooms/${encodeURIComponent(roomId)}/questions`, null, { status, limit: 50, cursor: append ? state.questionCursor : null });
+    if (state.roomId !== roomId || generation !== state.contextGeneration || status !== state.questionStatus) return;
     const signature = JSON.stringify(data.items);
     if (!append && signature === state.questionFirstSignature) return;
     if (append) {
@@ -3876,10 +3913,7 @@ ${GUEST_UI_LOOK_CSS}`;
     const action = button2.dataset.action;
     if (action === "select-question" && event.target.closest("form,button,select,textarea,input")) return;
     if (action === "cancel-create") {
-      if (state.rooms[0]) {
-        hideCreate();
-        await selectRoom(state.rooms[0].roomId);
-      } else showCreate();
+      await cancelCreate().catch(showError);
       return;
     }
     if (action === "retry-models") {
@@ -3902,15 +3936,21 @@ ${GUEST_UI_LOOK_CSS}`;
     if (action === "create-room") {
       try {
         clearError();
+        const generation = state.contextGeneration;
         const members = state.createAgents.map((row) => {
           const model = state.models.find((item) => modelKey(item) === row.modelKey);
           if (!model) throw new Error("\u8BF7\u4E3A\u6BCF\u4E2A\u6210\u5458\u9009\u62E9\u6709\u6548\u6A21\u578B\u3002");
           return { role: row.role, displayName: row.displayName.trim(), model };
         });
         const room = await request("POST", "/rooms", { projectDir: state.projectDir, title: $("#create-title").value, preset: $("#create-preset").value, humanName: $("#create-human").value, members });
+        toast("\u623F\u95F4\u5DF2\u521B\u5EFA\uFF0C\u6B63\u5728\u51C6\u5907\u6839\u4F1A\u8BDD\u548C\u6210\u5458\u4F1A\u8BDD\u3002", "success");
+        if (generation !== state.contextGeneration) {
+          if (!state.rooms.some((item) => item.roomId === room.roomId)) state.rooms.unshift(room);
+          renderRoomSelect();
+          return;
+        }
         state.creating = false;
         await loadRooms(room.roomId);
-        toast("\u623F\u95F4\u5DF2\u521B\u5EFA\uFF0C\u6B63\u5728\u51C6\u5907\u6839\u4F1A\u8BDD\u548C\u6210\u5458\u4F1A\u8BDD\u3002", "success");
       } catch (error) {
         showError(error);
       }
@@ -4077,8 +4117,8 @@ ${GUEST_UI_LOOK_CSS}`;
       submitAnswer(event.target);
     }
   });
-  $("#new-room").addEventListener("click", () => state.creating ? (hideCreate(), state.rooms[0] && selectRoom(state.rooms[0].roomId)) : (resetCreateAgents(), showCreate()));
-  $("#room-select").addEventListener("change", (event) => event.target.value && selectRoom(event.target.value));
+  $("#new-room").addEventListener("click", () => state.creating ? void cancelCreate().catch(showError) : (resetCreateAgents(), showCreate()));
+  $("#retry-rooms").addEventListener("click", () => void openRoomPage());
   $("#question-status").addEventListener("change", () => {
   });
   $("#history-search").addEventListener("change", async () => {
@@ -4208,58 +4248,46 @@ ${GUEST_UI_LOOK_CSS}`;
   });
   setInterval(() => void refreshOpenRoom(), REFRESH_INTERVAL_MS);
   mountProjectPicker();
-  var readyGeneration = 0;
-  host.onReady(async (ctx) => {
+  async function openRoomPage() {
+    $("#room-loading").hidden = false;
+    $("#new-room").disabled = true;
+    $("#retry-rooms").hidden = true;
+    clearError();
+    try {
+      await loadRooms(void 0, host.storage.get("discussion-view").catch(() => null));
+    } catch (error) {
+      showError(error);
+      $("#retry-rooms").hidden = false;
+    } finally {
+      $("#room-loading").hidden = true;
+      $("#new-room").disabled = false;
+    }
+  }
+  host.onReady((ctx) => {
     applyHostReady(ctx, document.documentElement);
-    const generation = ++readyGeneration;
-    const directoryChanged = ctx.directory !== state.directory;
     const previousProjectDir = state.projectDir;
-    state.directory = ctx.directory;
-    mountProjectPicker();
+    state.directory = ctx.directory ?? null;
+    if (!state.roomId && !state.projectManual) {
+      state.projectDir = state.directory;
+      state.projectId = null;
+    }
+    resolveProjectSelection();
+    updateProjectPicker();
     if (!projectsLoaded) {
       projectsLoaded = true;
       subscribeProjects();
       void loadProjects();
-    }
-    if (directoryChanged) {
-      if (!state.projectManual) {
-        state.projectDir = ctx.directory;
-        state.projectId = null;
-      } else if (state.projectId === "current-workspace") state.projectDir = ctx.directory;
-      resolveProjectSelection();
-      updateProjectPicker();
-    }
-    if (state.projectDir === previousProjectDir) return;
-    const context = ++state.contextGeneration;
-    state.roomId = null;
-    state.rooms = [];
-    state.pendingView = null;
-    if (state.projectDir) {
-      try {
-        const saved = await host.storage.get("discussion-view");
-        if (generation !== readyGeneration || context !== state.contextGeneration) return;
-        if (saved?.roomId) {
-          state.roomId = saved.roomId;
-          state.pendingView = saved;
-        }
-        if (saved?.questionStatus) state.questionStatus = saved.questionStatus;
-        if (saved?.mobilePane) state.mobilePane = saved.mobilePane;
-        const meta = await request("GET", "/meta");
-        if (generation !== readyGeneration || context !== state.contextGeneration) return;
-        state.createHumanName = meta.humanName || state.createHumanName;
-      } catch (error) {
-        showError(error);
-      }
-      if (generation !== readyGeneration || context !== state.contextGeneration) return;
-      await Promise.all([refreshModels(true, context), loadRooms(null, context)]);
-    } else {
-      await refreshModels(true, context);
-      if (generation !== readyGeneration || context !== state.contextGeneration) return;
-      if (!state.creating) {
-        $("#create-view").hidden = false;
-        $("#room-view").hidden = true;
-        renderCreate();
-      }
+      void request("GET", "/meta").then((meta) => {
+        if (state.createHumanName !== "\u623F\u4E3B" || !meta?.humanName) return;
+        state.createHumanName = meta.humanName;
+        const input = $("#create-human");
+        if (input && input.value === "\u623F\u4E3B") input.value = meta.humanName;
+      }).catch(() => {
+      });
+      void openRoomPage();
+    } else if (state.creating && state.projectDir !== previousProjectDir) {
+      renderCreate();
+      void refreshModels(true);
     }
   });
 })();

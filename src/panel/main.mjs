@@ -9,12 +9,12 @@ const state = {
   directory: null, projectDir: null, projectId: null, projectManual: false,
   projects: [], projectsState: "loading", projectsError: null,
   modelSource: null, modelError: null, modelsLoading: false, modelsForProject: undefined, modelsRequestGeneration: 0, contextGeneration: 0,
-  rooms: [], models: [], room: null, roomId: null, creating: false,
+  rooms: [], models: [], room: null, roomId: null, creating: false, returnRoomId: null,
   createAgents: [], createHumanName: "房主", timeline: [], timelineCursor: null, timelineSignature: "",
   questions: [], questionStatus: "pending", questionSignature: "", questionFirstSignature: "", questionCursor: null, selectedQuestionId: null,
   chatAnchor: null, followLatest: true, search: "", author: "", replyTo: null,
   mentions: new Set(), mentionAll: false, answerDrafts: {}, composerDraft: "", composerDraftRestored: false, mobilePane: "chat",
-  chatScroll: 0, questionScroll: 0, pendingView: null, loading: false, generation: 0,
+  chatScroll: 0, questionScroll: 0, loading: false, generation: 0,
 };
 const roleLabels = { generic: "通用", proposer: "提案者", reviewer: "审查者", moderator: "主持人" };
 const statusLabels = {
@@ -67,12 +67,31 @@ function persistViewSoon() {
 }
 
 function renderRoomSelect() {
-  const select = $("#room-select");
-  select.innerHTML = `<option value="">选择讨论室</option>${state.rooms.map(room => `<option value="${escape(room.roomId)}">${escape(room.title)} · ${escape(room.status === "ready" ? "进行中" : room.status === "paused" ? "已暂停" : room.status === "ended" ? "已结束" : "创建中")}</option>`).join("")}`;
-  select.value = state.roomId || "";
-  $("#new-room").textContent = state.creating ? "取消新建" : "新建房间";
+  const projects = new Map(state.projects.map(project => [project.directory, project.name]));
+  const status = { ready: "进行中", paused: "已暂停", ended: "已结束", creating: "创建中" };
+  roomSelectHandle.update({
+    value: state.roomId,
+    disabled: !state.rooms.length,
+    options: state.rooms.map(room => ({
+      id: room.roomId,
+      label: `${room.title} · ${projects.get(room.projectDir) || room.projectDir}`,
+      hint: status[room.status],
+    })),
+  });
+  $("#new-room").textContent = state.creating && state.rooms.length ? "取消新建" : "新建房间";
+  $("#new-room").hidden = state.creating && !state.rooms.length;
 }
 
+const roomSelectHandle = mountSelect($("#room-select"), {
+  label: "讨论室",
+  value: null,
+  options: [],
+  placeholder: "选择讨论室",
+  searchable: true,
+  searchPlaceholder: "搜索房间或项目",
+  disabled: true,
+  onChange: roomId => { if (roomId !== state.roomId || $("#room-view").hidden) void selectRoom(roomId).catch(showError); },
+});
 let projectSelectHandle = null;
 let projectsLoaded = false;
 let projectsSubscribed = false;
@@ -99,12 +118,12 @@ function resolveProjectSelection() {
   if (!option && state.projectManual) state.projectManual = false;
   if (!option) {
     option = options.find(item => item.directory === state.projectDir)
-      || (state.directory ? options.find(item => item.directory === state.directory) : null)
+      || (!state.roomId && state.directory ? options.find(item => item.directory === state.directory) : null)
       || (state.directory ? options.find(item => item.id === "current-workspace") : null)
       || null;
   }
   state.projectId = option?.id || null;
-  state.projectDir = option?.directory ?? state.directory ?? null;
+  state.projectDir = option?.directory ?? state.projectDir ?? state.directory ?? null;
 }
 function renderProjectHint() {
   const el = $("#project-hint");
@@ -145,7 +164,11 @@ function applyProjectsSnapshot(snapshot) {
   state.projects = nextProjects;
   resolveProjectSelection();
   updateProjectPicker();
-  if (state.projectDir !== previousDir) void reloadProjectContext();
+  if (state.rooms.length) renderRoomSelect();
+  if (state.creating && state.projectDir !== previousDir) {
+    renderCreate();
+    void refreshModels(true);
+  }
 }
 async function loadProjects() {
   try {
@@ -189,8 +212,11 @@ function selectProject(id) {
   const changed = state.projectDir !== option.directory;
   state.projectDir = option.directory;
   projectSelectHandle?.update({ value: id });
-  if (changed) void reloadProjectContext();
-  else updateProjectPicker();
+  updateProjectPicker();
+  if (changed) {
+    renderCreate();
+    void refreshModels(true);
+  }
 }
 
 function modelKey(model) { return model ? JSON.stringify([model.providerID, model.id, model.variant || ""]) : ""; }
@@ -309,6 +335,7 @@ async function refreshModels(force = false, generation = state.contextGeneration
   state.modelsLoading = true;
   state.modelError = null;
   renderModelSourceHint();
+  updateCreateActions();
   try {
     const catalog = await request("GET", "/models", null, state.projectDir ? { directory: state.projectDir } : null);
     if (generation !== state.contextGeneration || requestGeneration !== state.modelsRequestGeneration) return;
@@ -333,19 +360,22 @@ async function refreshModels(force = false, generation = state.contextGeneration
   renderModelSourceHint();
 }
 function showCreate() {
+  if (!state.creating) state.returnRoomId = state.roomId;
   state.creating = true;
+  state.contextGeneration += 1;
   state.roomId = null;
   state.room = null;
   $("#create-view").hidden = false;
   $("#room-view").hidden = true;
+  $("#room-loading").hidden = true;
+  $("#retry-rooms").hidden = true;
   renderRoomSelect();
   renderCreate();
   void refreshModels(true);
 }
-function hideCreate() {
-  state.creating = false;
-  $("#create-view").hidden = true;
-  renderRoomSelect();
+async function cancelCreate() {
+  const room = state.rooms.find(room => room.roomId === state.returnRoomId) || state.rooms[0];
+  if (room) await selectRoom(room.roomId);
 }
 function defaultName(role, index, rows) {
   const base = role === "generic" ? `Agent ${index + 1}` : roleLabels[role];
@@ -356,7 +386,7 @@ function defaultName(role, index, rows) {
 function renderCreate() {
   disposeModelHandles();
   const preset = state.createPreset || "generic";
-  $("#create-view").innerHTML = `
+  $("#create-form").innerHTML = `
     <h1>新建讨论室</h1>
     <p class="intro">每个房间创建一个根会话；成员会话显示在根会话下方，也可从成员“会话”按钮打开。建房本身不会调用模型。</p>
     <div class="form-grid">
@@ -377,7 +407,7 @@ function renderCreate() {
     <button class="button secondary" data-action="add-agent">添加成员</button>
     <div class="warning">新会话使用所选项目工作区，默认完全执行权限，并在会话级禁用原生提问工具。多个 Agent 同时写同一工作区可能互相覆盖文件；讨论文档请写房间临时目录。不会修改全局权限，不创建 worktree。</div>
     <div id="model-source-hint" class="model-source-hint" hidden></div>
-    <div id="create-actions" class="create-actions"><button class="button primary" data-action="create-room" disabled>创建房间</button><button class="button secondary" data-action="cancel-create">取消</button></div>
+    <div id="create-actions" class="create-actions"><button class="button primary" data-action="create-room" disabled>创建房间</button>${state.rooms.length ? '<button class="button secondary" data-action="cancel-create">取消</button>' : ""}</div>
     ${!state.projectDir ? `<p class="intro">请先选择房间所属项目。</p>` : ""}
   `;
   mountCreateModelPickers();
@@ -397,41 +427,31 @@ function resetCreateAgents() {
   });
 }
 
-async function reloadProjectContext() {
-  const generation = ++state.contextGeneration;
-  state.pendingView = null;
-  state.rooms = []; state.room = null; state.roomId = null;
-  state.timeline = []; state.timelineCursor = null; state.timelineSignature = "";
-  state.questions = []; state.questionSignature = ""; state.questionFirstSignature = ""; state.questionCursor = null;
-  state.selectedQuestionId = null; state.chatAnchor = null; state.followLatest = true;
-  state.models = []; state.modelsForProject = undefined; state.modelSource = null; state.modelError = null; state.modelsLoading = false;
-  renderRoomSelect();
-  $("#room-view").hidden = true;
-  if (!state.creating) {
-    $("#create-view").hidden = false;
-    renderCreate();
-  }
-  if (!state.projectDir) { await refreshModels(true, generation); return; }
-  await Promise.all([refreshModels(true, generation), loadRooms(null, generation)]);
-}
-async function loadRooms(preferred, generation = state.contextGeneration) {
-  const data = await request("GET", "/rooms", null, { projectDir: state.projectDir });
+async function loadRooms(preferred, savedView) {
+  const generation = state.contextGeneration;
+  const [data, restore] = await Promise.all([request("GET", "/rooms"), savedView]);
   if (generation !== state.contextGeneration) return;
-  state.rooms = data.rooms;
-  const requested = preferred || state.roomId;
-  let next = state.rooms.some(room => room.roomId === requested) ? requested : state.rooms[0]?.roomId || null;
-  if (state.creating) next = null;
+  state.rooms = data.rooms.sort((a, b) =>
+    Number(b.projectDir === state.directory) - Number(a.projectDir === state.directory));
+  const requested = preferred || state.roomId || restore?.roomId;
+  const next = state.rooms.find(room => room.roomId === requested) || state.rooms[0];
   renderRoomSelect();
-  if (next && state.rooms.some(room => room.roomId === next)) await selectRoom(next, state.pendingView, generation);
-  else if (!state.creating) {
-    state.room = null; state.roomId = null;
-    $("#create-view").hidden = false; $("#room-view").hidden = true;
-    renderCreate();
-  }
+  if (next && !state.creating) await selectRoom(next.roomId, restore);
+  else if (!state.creating) showCreate();
 }
-async function selectRoom(roomId, restore = null, generation = state.contextGeneration) {
-  if (!roomId) return;
+async function selectRoom(roomId, restore = null) {
+  const selected = state.rooms.find(room => room.roomId === roomId);
+  if (!selected) return;
+  const generation = ++state.contextGeneration;
+  clearError();
+  state.projectDir = selected.projectDir;
+  state.projectId = projectOptions().find(project => project.directory === state.projectDir)?.id || null;
+  state.projectManual = false;
+  updateProjectPicker();
   const view = restore?.roomId === roomId ? restore : null;
+  if (view?.questionStatus) state.questionStatus = view.questionStatus;
+  if (view?.mobilePane) state.mobilePane = view.mobilePane;
+  state.room = null;
   state.roomId = roomId;
   state.creating = false;
   state.chatAnchor = view?.chatAnchor || null;
@@ -439,20 +459,44 @@ async function selectRoom(roomId, restore = null, generation = state.contextGene
   state.timelineSignature = ""; state.questionSignature = ""; state.questionFirstSignature = ""; state.questionCursor = null; state.followLatest = view?.followLatest ?? true;
   state.search = view?.search || ""; state.author = view?.author || ""; state.replyTo = null;
   state.mentions.clear(); state.mentionAll = false; state.composerDraft = view?.composerDraft || ""; state.composerDraftRestored = !!view;
-  state.pendingView = null;
+  state.questions = [];
+  state.questionScroll = view?.questionScroll || 0;
   $("#create-view").hidden = true;
-  $("#room-view").hidden = false;
+  $("#room-view").hidden = true;
+  $("#room-loading").hidden = false;
+  $("#retry-rooms").hidden = true;
   $("#room-view").dataset.mobilePane = state.mobilePane;
   $("#question-status").value = state.questionStatus;
   document.querySelectorAll(".mobile-tabs button").forEach(button => button.classList.toggle("active", button.dataset.pane === state.mobilePane));
   $("#history-search").value = state.search;
   renderRoomSelect();
-  await Promise.all([refreshRoom(), loadQuestions()]);
+  $("#question-list").innerHTML = '<div class="empty" role="status">正在读取问题…</div>';
+  $("#pending-count").textContent = "—";
+  const chat = Promise.all([
+    refreshRoom(),
+    state.chatAnchor ? loadTimeline(false, null, state.chatAnchor) : loadTimeline(true),
+  ]);
+  void loadQuestions().then(() => {
+    if (generation === state.contextGeneration && view?.questionScroll) {
+      $("#question-list").scrollTop = view.questionScroll;
+    }
+  }).catch(() => {
+    if (generation !== state.contextGeneration || state.questionFirstSignature) return;
+    $("#question-list").innerHTML = '<div class="empty" role="status">暂时无法读取问题，正在重试。</div>';
+  });
+  void refreshModels(false, generation);
+  try {
+    await chat;
+  } catch (error) {
+    if (generation !== state.contextGeneration) return;
+    $("#retry-rooms").hidden = false;
+    throw error;
+  } finally {
+    if (generation === state.contextGeneration) $("#room-loading").hidden = true;
+  }
   if (generation !== state.contextGeneration) return;
-  if (state.chatAnchor) await loadTimeline(false, null, state.chatAnchor);
-  else await loadTimeline(true);
-  if (generation !== state.contextGeneration) return;
-  if (view?.questionScroll) $("#question-list").scrollTop = view.questionScroll;
+  $("#room-view").hidden = false;
+  if (state.questionFirstSignature && view?.questionScroll) $("#question-list").scrollTop = view.questionScroll;
   if (view?.chatScroll) $("#timeline").scrollTop = view.chatScroll;
   renderComposer();
   renderAuthorFilter();
@@ -462,9 +506,16 @@ async function selectRoom(roomId, restore = null, generation = state.contextGene
 async function refreshRoom() {
   if (!state.roomId) return;
   const roomId = state.roomId;
+  const generation = state.contextGeneration;
   const room = await request("GET", `/rooms/${encodeURIComponent(roomId)}`);
-  if (state.roomId !== roomId) return;
+  if (state.roomId !== roomId || generation !== state.contextGeneration) return;
+  const listed = state.rooms.find(item => item.roomId === roomId);
+  if (listed && listed.status !== room.status) {
+    listed.status = room.status;
+    renderRoomSelect();
+  }
   state.room = room;
+  $("#pending-count").textContent = String(room.pendingQuestions || 0);
   renderRoomHeader();
   renderAuthorFilter();
   const ready = state.room.status === "ready";
@@ -561,10 +612,11 @@ function renderTimeline() {
 async function loadTimeline(initial = false, cursor = null, contextId = null) {
   if (!state.roomId) return;
   const roomId = state.roomId;
+  const generation = state.contextGeneration;
   let data;
   if (contextId) data = await request("GET", `/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(contextId)}/context`, null, { before: 5, after: 8 });
   else data = await request("GET", `/rooms/${encodeURIComponent(roomId)}/timeline`, null, { cursor, limit: 50, query: state.search, authorMemberId: state.author });
-  if (state.roomId !== roomId) return;
+  if (state.roomId !== roomId || generation !== state.contextGeneration) return;
   const signature = JSON.stringify(data.items);
   if (!cursor && !contextId && signature === state.timelineSignature && !initial) return;
   state.timelineSignature = signature;
@@ -642,8 +694,10 @@ async function sendMessage() {
 async function loadQuestions(append = false) {
   if (!state.roomId) return;
   const roomId = state.roomId;
-  const data = await request("GET", `/rooms/${encodeURIComponent(roomId)}/questions`, null, { status: state.questionStatus, limit: 50, cursor: append ? state.questionCursor : null });
-  if (state.roomId !== roomId) return;
+  const generation = state.contextGeneration;
+  const status = state.questionStatus;
+  const data = await request("GET", `/rooms/${encodeURIComponent(roomId)}/questions`, null, { status, limit: 50, cursor: append ? state.questionCursor : null });
+  if (state.roomId !== roomId || generation !== state.contextGeneration || status !== state.questionStatus) return;
   const signature = JSON.stringify(data.items);
   if (!append && signature === state.questionFirstSignature) return;
   if (append) {
@@ -1016,7 +1070,7 @@ app.addEventListener("click", async event => {
   if (!button) return;
   const action = button.dataset.action;
   if (action === "select-question" && event.target.closest("form,button,select,textarea,input")) return;
-  if (action === "cancel-create") { if (state.rooms[0]) { hideCreate(); await selectRoom(state.rooms[0].roomId); } else showCreate(); return; }
+  if (action === "cancel-create") { await cancelCreate().catch(showError); return; }
   if (action === "retry-models") { void refreshModels(true); return; }
   if (action === "add-agent" && state.createAgents.length < 8) {
     const index = state.createAgents.length;
@@ -1029,15 +1083,21 @@ app.addEventListener("click", async event => {
   if (action === "create-room") {
     try {
       clearError();
+      const generation = state.contextGeneration;
       const members = state.createAgents.map(row => {
         const model = state.models.find(item => modelKey(item) === row.modelKey);
         if (!model) throw new Error("请为每个成员选择有效模型。");
         return { role: row.role, displayName: row.displayName.trim(), model };
       });
       const room = await request("POST", "/rooms", { projectDir: state.projectDir, title: $("#create-title").value, preset: $("#create-preset").value, humanName: $("#create-human").value, members });
+      toast("房间已创建，正在准备根会话和成员会话。", "success");
+      if (generation !== state.contextGeneration) {
+        if (!state.rooms.some(item => item.roomId === room.roomId)) state.rooms.unshift(room);
+        renderRoomSelect();
+        return;
+      }
       state.creating = false;
       await loadRooms(room.roomId);
-      toast("房间已创建，正在准备根会话和成员会话。", "success");
     } catch (error) { showError(error); }
     return;
   }
@@ -1122,8 +1182,8 @@ app.addEventListener("input", event => {
   }
 });
 app.addEventListener("submit", event => { if (event.target.matches("[data-question-form]")) { event.preventDefault(); submitAnswer(event.target); } });
-$("#new-room").addEventListener("click", () => state.creating ? (hideCreate(), state.rooms[0] && selectRoom(state.rooms[0].roomId)) : (resetCreateAgents(), showCreate()));
-$("#room-select").addEventListener("change", event => event.target.value && selectRoom(event.target.value));
+$("#new-room").addEventListener("click", () => state.creating ? void cancelCreate().catch(showError) : (resetCreateAgents(), showCreate()));
+$("#retry-rooms").addEventListener("click", () => void openRoomPage());
 $("#question-status").addEventListener("change", () => {});
 $("#history-search").addEventListener("change", async () => { state.search = $("#history-search").value.trim(); state.chatAnchor = null; state.followLatest = true; await loadTimeline(true); });
 $("#author-filter").addEventListener("change", async () => { state.author = $("#author-filter").value; state.chatAnchor = null; state.followLatest = true; await loadTimeline(true); });
@@ -1201,48 +1261,45 @@ setInterval(() => void refreshOpenRoom(), REFRESH_INTERVAL_MS);
 
 mountProjectPicker();
 
-let readyGeneration = 0;
-host.onReady(async ctx => {
+async function openRoomPage() {
+  $("#room-loading").hidden = false;
+  $("#new-room").disabled = true;
+  $("#retry-rooms").hidden = true;
+  clearError();
+  try {
+    await loadRooms(undefined, host.storage.get("discussion-view").catch(() => null));
+  } catch (error) {
+    showError(error);
+    $("#retry-rooms").hidden = false;
+  } finally {
+    $("#room-loading").hidden = true;
+    $("#new-room").disabled = false;
+  }
+}
+
+host.onReady(ctx => {
   applyHostReady(ctx, document.documentElement);
-  const generation = ++readyGeneration;
-  const directoryChanged = ctx.directory !== state.directory;
   const previousProjectDir = state.projectDir;
-  state.directory = ctx.directory;
-  mountProjectPicker();
+  state.directory = ctx.directory ?? null;
+  if (!state.roomId && !state.projectManual) {
+    state.projectDir = state.directory;
+    state.projectId = null;
+  }
+  resolveProjectSelection();
+  updateProjectPicker();
   if (!projectsLoaded) {
     projectsLoaded = true;
     subscribeProjects();
     void loadProjects();
-  }
-  if (directoryChanged) {
-    if (!state.projectManual) { state.projectDir = ctx.directory; state.projectId = null; }
-    else if (state.projectId === "current-workspace") state.projectDir = ctx.directory;
-    resolveProjectSelection();
-    updateProjectPicker();
-  }
-  if (state.projectDir === previousProjectDir) return;
-  const context = ++state.contextGeneration;
-  state.roomId = null; state.rooms = []; state.pendingView = null;
-  if (state.projectDir) {
-    try {
-      const saved = await host.storage.get("discussion-view");
-      if (generation !== readyGeneration || context !== state.contextGeneration) return;
-      if (saved?.roomId) { state.roomId = saved.roomId; state.pendingView = saved; }
-      if (saved?.questionStatus) state.questionStatus = saved.questionStatus;
-      if (saved?.mobilePane) state.mobilePane = saved.mobilePane;
-      const meta = await request("GET", "/meta");
-      if (generation !== readyGeneration || context !== state.contextGeneration) return;
-      state.createHumanName = meta.humanName || state.createHumanName;
-    } catch (error) { showError(error); }
-    if (generation !== readyGeneration || context !== state.contextGeneration) return;
-    await Promise.all([refreshModels(true, context), loadRooms(null, context)]);
-  } else {
-    await refreshModels(true, context);
-    if (generation !== readyGeneration || context !== state.contextGeneration) return;
-    if (!state.creating) {
-      $("#create-view").hidden = false;
-      $("#room-view").hidden = true;
-      renderCreate();
-    }
+    void request("GET", "/meta").then(meta => {
+      if (state.createHumanName !== "房主" || !meta?.humanName) return;
+      state.createHumanName = meta.humanName;
+      const input = $("#create-human");
+      if (input && input.value === "房主") input.value = meta.humanName;
+    }).catch(() => {});
+    void openRoomPage();
+  } else if (state.creating && state.projectDir !== previousProjectDir) {
+    renderCreate();
+    void refreshModels(true);
   }
 });
