@@ -30,6 +30,8 @@ npm run smoke
 
 `smoke` 会启动隔离的 OpenCode、OpenChamber 和本地模拟模型，不调用外部模型，结束后自行清理。
 
+PR 修改 `src/` 或 `panel/` 时，CI 要求同步升级版本号，并校验 lockfile、health 和测试断言里的版本一致；只改文档不要求升级。
+
 在 OpenChamber 中：
 
 1. 打开「设置 → 扩展」，添加本目录的绝对路径。
