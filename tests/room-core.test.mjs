@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { RoomStore } from "../src/core/room-store.mjs";
+import { RoomStore, RULES_VERSION } from "../src/core/room-store.mjs";
 import { RoomEngine } from "../src/core/room-engine.mjs";
 import { displayWidth } from "../src/core/display-width.mjs";
 
@@ -67,10 +67,10 @@ test.after(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
 
-test("display width is grapheme-based and shared limits hold at 100/101", () => {
-  assert.equal(displayWidth("a".repeat(100)), 100);
-  assert.equal(displayWidth("界".repeat(50)), 100);
-  assert.equal(displayWidth("界".repeat(50) + "a"), 101);
+test("display width is grapheme-based and distinguishes 200 from 201 columns", () => {
+  assert.equal(displayWidth("a".repeat(200)), 200);
+  assert.equal(displayWidth("界".repeat(100)), 200);
+  assert.equal(displayWidth("界".repeat(100) + "a"), 201);
   assert.equal(displayWidth("e\u0301"), 1);
   assert.equal(displayWidth("\u0301"), 0);
   assert.equal(displayWidth("Ａ"), 2);
@@ -78,6 +78,72 @@ test("display width is grapheme-based and shared limits hold at 100/101", () => 
   assert.equal(displayWidth("👨‍👩‍👧‍👦"), 2);
   assert.equal(displayWidth("ab🙂"), 4);
   assert.equal(displayWidth("\n\t"), 2);
+});
+
+test("a paused room reconciles a missed completion without waking anyone or logging a repeated pause", async () => {
+  const { store, engine, roomId, members, setStatus, close } = setup();
+  const member = members[0];
+  engine.executionEvent(member.session_id, "started", "started-1");
+  setStatus(0, "running");
+  engine.pause(roomId);
+  engine.pause(roomId);
+  await engine.scan();
+  assert.equal(store.member(member.id).last_status, "running");
+  setStatus(0, "unknown");
+  await engine.scan();
+  assert.equal(store.member(member.id).last_status, "running");
+  setStatus(0, "idle");
+  await engine.scan();
+  assert.equal(store.member(member.id).last_status, "idle");
+  assert.equal(store.member(member.id).last_terminal_round, -1);
+  assert.ok(engine.diagnostics(roomId).some(event => event.kind === "session-status-reconciled"));
+  engine.executionEvent(member.session_id, "succeeded", "finished-1");
+  assert.equal(store.member(member.id).last_status, "idle");
+  assert.equal(store.member(member.id).idle_epoch, 1);
+  assert.equal(store.reminders(roomId).length, 0);
+  assert.equal(store.db.prepare("SELECT count(*) AS count FROM config_events WHERE room_id=? AND kind='room-paused'").get(roomId).count, 1);
+  close();
+});
+
+test("successful agent sends keep unread messages and one existing anchor within eight rows", () => {
+  const { store, engine, roomId, members, close } = setup();
+  const member = members[0];
+  const send = text => engine.post(roomId, source(member), { text });
+  const seed = text => engine.post(roomId, human(store, roomId), { text });
+  const seqs = result => result.timeline.map(row => row.roomSeq);
+  assert.deepEqual(seqs(send("第一条")), [1]);
+  const read = seed("已读锚点");
+  engine.markRead(roomId, member.id, [read.messageId]);
+  assert.deepEqual(seqs(send("只有已读")), [2, 3]);
+  const newUnread = seed("这条未读");
+  const newerRead = seed("后面这条读了");
+  engine.markRead(roomId, member.id, [newerRead.messageId]);
+  const ask = engine.ask(roomId, source(member), { text: "请求确认" });
+  assert.deepEqual(seqs(ask), [4, 5, 6]);
+  assert.equal(store.hasRead(member.id, newUnread.messageId), false);
+  assert.ok(ask.presentation.messageIds.includes(newUnread.messageId));
+  const outside = seed("窗口外的未读");
+  for (let index = 0; index < 7; index += 1) seed(`新未读 ${index}`);
+  const full = send("最近七条都未读");
+  assert.deepEqual(seqs(full), [8, 9, 10, 11, 12, 13, 14, 15]);
+  assert.equal(full.unread.unreadCount, 2);
+  assert.ok(!full.presentation.messageIds.includes(outside.messageId));
+  close();
+});
+
+test("opening an existing room queues updated instructions without resetting the room", () => {
+  const file = join(scratch(), "room.sqlite");
+  const { store, roomId, close } = setup({ filename: file });
+  store.db.prepare("UPDATE rooms SET rules_version=? WHERE id=?").run("room-rules-2026-11-26", roomId);
+  close();
+  const reopened = new RoomStore(file);
+  assert.equal(reopened.room(roomId).rules_version, RULES_VERSION);
+  assert.equal(reopened.room(roomId).status, "ready");
+  const job = new RoomEngine(reopened).nextJob();
+  assert.equal(job.type, "put-instructions");
+  assert.match(job.value, /有人问你，先直接回答/);
+  assert.doesNotMatch(job.value, /replyToMessageId|mentionMemberIds|mentionAll|优先引用/);
+  reopened.close();
 });
 
 test("creation makes independent empty sessions, unique names and per-session instructions", async () => {
@@ -90,7 +156,7 @@ test("creation makes independent empty sessions, unique names and per-session in
     assert.match(instructions, new RegExp(member.display_name));
     assert.match(instructions, new RegExp(member.id));
     assert.match(instructions, /共享临时目录/);
-    assert.match(instructions, /room_unread/);
+    assert.match(instructions, /先读相关未读消息/);
     if (member.role === "generic") assert.doesNotMatch(instructions, /兼做核验/);
   }
   assert.match(store.instructions(roomId, members[2].id).value, /兼做核验/);
@@ -447,6 +513,7 @@ test("pre-send review shares a 30 second window between post and ask", async () 
   engine.post(roomId, source(members[1]), { text: "请先读" });
   const blocked = engine.post(roomId, source(members[0]), { text: "草稿" });
   assert.equal(blocked.status, "review_required");
+  assert.equal(blocked.statusLabel, "先读后发");
   assert.equal(blocked.checkDecision, "executed");
   assert.equal(store.roomSummary(store.room(roomId)).latestSeq, 1);
   assert.equal(blocked.unread.unreadCount, 0);
@@ -465,12 +532,14 @@ test("pre-send review shares a 30 second window between post and ask", async () 
 test("over-width drafts do not write or refresh the check window", async () => {
   const { store, engine, roomId, members, tick } = setup();
   engine.post(roomId, source(members[1]), { text: "未读" });
-  assert.throws(() => engine.post(roomId, source(members[0]), { text: "界".repeat(51) }), error => error.code === "ROOM_MESSAGE_TOO_LONG" && error.details.actual === 102);
+  assert.throws(() => engine.post(roomId, source(members[0]), { text: "界".repeat(100) + "a" }), error => (
+    error.code === "ROOM_MESSAGE_TOO_LONG" && error.details.actual === 201 && /limit is 200/.test(error.message)
+  ));
   assert.equal(store.member(members[0].id).last_check_at, null);
   assert.equal(engine.post(roomId, source(members[0]), { text: "合格草稿" }).status, "review_required");
   const checkedAt = store.member(members[0].id).last_check_at;
   tick(1000);
-  assert.throws(() => engine.ask(roomId, source(members[0]), { text: "界".repeat(51) }), error => error.code === "ROOM_MESSAGE_TOO_LONG");
+  assert.throws(() => engine.ask(roomId, source(members[0]), { text: "界".repeat(100), options: ["甲", "乙"] }), error => error.code === "ROOM_MESSAGE_TOO_LONG");
   assert.equal(store.member(members[0].id).last_check_at, checkedAt);
 });
 

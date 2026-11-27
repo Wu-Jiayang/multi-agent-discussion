@@ -6,7 +6,8 @@ import { decodeCursor, encodeCursor, requireCursor } from "./cursor.mjs";
 import { assertAgentWidth, MAX_AGENT_MESSAGE_WIDTH } from "./display-width.mjs";
 import { fail } from "./errors.mjs";
 
-export const RULES_VERSION = "room-rules-2026-11-26";
+const PREVIOUS_RULES_VERSIONS = ["room-rules-2026-11-26", "room-rules-2026-11-27"];
+export const RULES_VERSION = "room-rules-2026-11-27-chat";
 export const ROLE_LABELS = { generic: "通用", proposer: "提案者", reviewer: "审查者", moderator: "主持人" };
 export const QUESTION_STATUSES = new Set(["pending", "answered", "withdrawn"]);
 
@@ -17,13 +18,14 @@ const ROLE_INSTRUCTIONS = {
   moderator: "根据读到的发言归纳共识、分歧和下一步。讨论跑题或重复时，指出已讨论过的内容并拉回尚未解决的问题。成员灰心或迷茫时肯定已有进展，必要时建议容易尝试的下一步。不代替成员决定，不把沉默当成同意。",
 };
 
-const COMMON_RULES = `收到房间提醒后，先读相关未读消息（可用 room_unread()）。被唤醒、被 @ 或读完消息，都不要求你发言。有新观点、证据、反例或值得回答的问题时再发帖。没有新内容，就继续原任务或结束本轮；不要只回「收到」或重复别人的结论。
-需要对方尽快注意时，从会话指令里的成员名单找到对方的 ID，再用 room_post 或 room_ask 的 mentionMemberIds 点名。需要重查名单时用 room_members()。只在正文写 @显示名 不会点名。普通接话用 replyToMessageId 引用即可；只有确实需要通知所有人才传 mentionAll: true。
-需要真人回答时用 room_ask，包括单选问题；只有真人可以正式作答。问同伴用 room_post，需要尽快注意时才点名。不要在独立会话中调用 OpenCode 原生提问工具；发出房间问题后可继续工作或结束本轮。
+const COMMON_RULES = `收到房间提醒后，先读相关未读消息。被唤醒、被 @ 或读完消息，都不要求你发言。有新观点、证据、反例或值得回答的问题时再发帖。没有新内容，就继续原任务或结束本轮；不要只回「收到」或重复别人的结论。
+像在项目群里接话。有人问你，先直接回答，用对方听得懂的话说重点。别人已经说清楚了，就只补会改变判断的新信息。贴文档时，把最重要的结论留在群里。
+需要对方尽快注意时才点名；只有确实需要通知所有人时才点名全体。
+需要真人回答时在房间里提问；只有真人可以正式作答。问同伴用普通房间消息。不要在独立会话中调用 OpenCode 原生提问工具；发出房间问题后可继续工作或结束本轮。
 读完但不发帖是正常行为，不需要发「跳过」消息，也不触发其他成员。没读就结束仍会按未读规则提醒；沉默不改变已读状态，不表示同意。`;
 
 const SCENARIO_INSTRUCTIONS = {
-  debate: "当前是双模型辩论。初始立场只是起点，可随证据变化。每帖只写一个主张、反例或修订；优先引用对方原帖。没有新内容可以沉默。收尾时各发一条总结，说明修改了什么或仍分歧在哪里。",
+  debate: "当前是双模型辩论。初始立场只是起点，可随证据变化。每帖只写一个主张、反例或修订。没有新内容可以沉默。收尾时各发一条总结，说明修改了什么或仍分歧在哪里。",
 };
 
 function json(value) {
@@ -203,6 +205,12 @@ export class RoomStore {
     if (previousSchema < schemaVersion) {
       this.db.prepare("INSERT INTO meta(key,value) VALUES('schema',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(schemaVersion));
     }
+    this.tx(() => {
+      this.db.prepare(`UPDATE members SET instructions_added=0 WHERE kind='agent' AND room_id IN
+        (SELECT id FROM rooms WHERE status<>'ended' AND rules_version IN (?,?))`).run(...PREVIOUS_RULES_VERSIONS);
+      this.db.prepare(`UPDATE rooms SET rules_version=?,config_json=json_set(config_json,'$.roles',?)
+        WHERE status<>'ended' AND rules_version IN (?,?)`).run(RULES_VERSION, RULES_VERSION, ...PREVIOUS_RULES_VERSIONS);
+    });
   }
 
   close() { this.db.close(); }
@@ -223,6 +231,12 @@ export class RoomStore {
     const row = this.db.prepare("SELECT * FROM rooms WHERE id=?").get(id);
     if (!row) fail("ROOM_NOT_FOUND", "Room not found.", { roomId: id }, 404);
     return row;
+  }
+
+  roomForRootSession(sessionId) {
+    const row = this.db.prepare("SELECT id, project_dir FROM rooms WHERE root_session_id=?").get(sessionId);
+    if (!row) fail("ROOM_NOT_FOUND", "Room not found.", {}, 404);
+    return { roomId: row.id, projectDir: row.project_dir };
   }
 
   member(id) {
@@ -561,11 +575,11 @@ export class RoomStore {
       }
       const result = this.insertMessage(roomId, author, { text, kind: "post", replyToMessageId: reply?.id, mentions, mentionAll }, now);
       this.markReadInTx(roomId, author.id, [result.messageId], "author", now);
-      const rows = this.db.prepare("SELECT * FROM messages WHERE room_id=? ORDER BY room_seq DESC LIMIT 8").all(roomId).reverse();
+      const rows = this.sendTimeline(roomId, author.id, source.kind === "agent");
       const view = this.renderRows(roomId, rows, author.id);
       const presentation = this.presentation(roomId, author.id, view.fullMessageIds, now);
       return {
-        status: "stored", messageId: result.messageId, roomSeq: result.roomSeq, questionId: null,
+        status: "stored", statusLabel: "已发送", messageId: result.messageId, roomSeq: result.roomSeq, questionId: null,
         timeline: view.rows, omittedBefore: view.rows.length ? encodeCursor({ roomId, query: "", authorId: null, mode: "history", direction: "older", anchorSeq: view.rows[0].roomSeq }) : null,
         unread: this.unreadSummary(roomId, author.id, view.fullMessageIds),
         presentation, checkDecision,
@@ -595,10 +609,10 @@ export class RoomStore {
       this.db.prepare(`INSERT INTO questions(id,room_id,message_id,asker_id,status,options_json,created_at,updated_at) VALUES(?,?,?,?,'pending',?,?,?)`)
         .run(questionId, roomId, result.messageId, author.id, json(options), now, now);
       this.markReadInTx(roomId, author.id, [result.messageId], "author", now);
-      const rows = this.db.prepare("SELECT * FROM messages WHERE room_id=? ORDER BY room_seq DESC LIMIT 8").all(roomId).reverse();
+      const rows = this.sendTimeline(roomId, author.id);
       const view = this.renderRows(roomId, rows, author.id);
       return {
-        status: "stored", messageId: result.messageId, roomSeq: result.roomSeq, questionId,
+        status: "stored", statusLabel: "已发送", messageId: result.messageId, roomSeq: result.roomSeq, questionId,
         timeline: view.rows, omittedBefore: view.rows.length ? encodeCursor({ roomId, query: "", authorId: null, mode: "history", direction: "older", anchorSeq: view.rows[0].roomSeq }) : null,
         unread: this.unreadSummary(roomId, author.id, view.fullMessageIds),
         presentation: this.presentation(roomId, author.id, view.fullMessageIds, now), checkDecision,
@@ -617,13 +631,28 @@ export class RoomStore {
     if (!hasUnread) return { checkDecision: "executed" };
     const view = this.renderRows(roomId, rows, author.id);
     return {
-      status: "review_required", messageId: null, roomSeq: null, questionId: null, checkDecision: "executed",
+      status: "review_required", statusLabel: "先读后发", messageId: null, roomSeq: null, questionId: null, checkDecision: "executed",
       timeline: view.rows, omittedBefore: view.rows.length ? encodeCursor({ roomId, query: "", authorId: null, mode: "history", direction: "older", anchorSeq: view.rows[0].roomSeq }) : null,
       unread: this.unreadSummary(roomId, author.id, view.fullMessageIds),
       presentation: this.presentation(roomId, author.id, view.fullMessageIds, now),
       mentionHint: null,
-      message: "Recent unread messages must be reviewed before posting. The draft was not stored. Read the timeline, then submit again or discard it.",
+      message: "Read the recent messages below first. This draft has not been sent; post it again only if it still adds something.",
     };
+  }
+
+  sendTimeline(roomId, authorId, compact = true) {
+    const rows = this.db.prepare("SELECT * FROM messages WHERE room_id=? ORDER BY room_seq DESC LIMIT 8").all(roomId);
+    if (!compact) return rows.reverse();
+    let oldestUnread = 0;
+    let anchor = 0;
+    for (let i = 1; i < rows.length; i += 1) {
+      if (this.hasRead(authorId, rows[i].id)) {
+        if (!anchor) anchor = i;
+      } else {
+        oldestUnread = i;
+      }
+    }
+    return rows.slice(0, Math.max(oldestUnread, anchor) + 1).reverse();
   }
 
   insertMessage(roomId, author, input, now) {
@@ -1210,15 +1239,15 @@ export class RoomStore {
         return { changed: false, member, terminal: true };
       }
       if (type === "succeeded") {
-        this.db.prepare("UPDATE members SET last_status='running',last_terminal_round=execution_round,failure_count=0,last_error=NULL,last_error_at=NULL,wake_backoff_until=NULL WHERE id=?").run(member.id);
+        this.db.prepare("UPDATE members SET last_terminal_round=execution_round,failure_count=0,last_error=NULL,last_error_at=NULL,wake_backoff_until=NULL WHERE id=?").run(member.id);
       } else if (type === "failed") {
         const message = executionErrorMessage(error);
         const failures = member.failure_count + 1;
         const retryAt = new Date(Date.parse(now) + failureBackoffMs(failures)).toISOString();
-        this.db.prepare("UPDATE members SET last_status='running',last_terminal_round=execution_round,failure_count=?,last_error=?,last_error_at=?,wake_backoff_until=? WHERE id=?")
+        this.db.prepare("UPDATE members SET last_terminal_round=execution_round,failure_count=?,last_error=?,last_error_at=?,wake_backoff_until=? WHERE id=?")
           .run(failures, message, now, retryAt, member.id);
       } else {
-        this.db.prepare("UPDATE members SET last_status='running',last_terminal_round=execution_round WHERE id=?").run(member.id);
+        this.db.prepare("UPDATE members SET last_terminal_round=execution_round WHERE id=?").run(member.id);
       }
       return { changed: true, member: this.member(member.id), terminal: true, error: type === "failed" ? executionErrorMessage(error) : null };
     }
@@ -1239,9 +1268,10 @@ export class RoomStore {
   pauseRoom(roomId, reason = "manual", now = new Date().toISOString()) {
     const room = this.room(roomId);
     if (room.status === "ended") fail("ROOM_ENDED", "The room has ended.");
+    if (room.status === "paused" && room.paused_reason === reason) return this.roomSummary(room);
     this.tx(() => {
       this.db.prepare("UPDATE rooms SET status='paused',paused_reason=? WHERE id=?").run(reason, roomId);
-      this.configEvent(roomId, "room-paused", { status: room.status, remaining: room.budget_remaining }, { status: "paused", reason });
+      this.configEvent(roomId, "room-paused", { status: room.status, remaining: room.budget_remaining }, { status: "paused", reason }, now);
     });
     return this.roomSummary(this.room(roomId));
   }

@@ -17,6 +17,7 @@ let release;
 let memberB = "";
 const modelRequests = [];
 const toolCalls = [];
+const deliveredRoomResults = [];
 
 function freePort() {
   return new Promise((resolvePort, reject) => {
@@ -70,6 +71,10 @@ async function main() {
     const data = JSON.parse(raw);
     const messages = data.messages || [];
     const serialized = JSON.stringify(messages);
+    for (const message of messages) {
+      if (message.role !== "tool" || typeof message.content !== "string") continue;
+      try { deliveredRoomResults.push(JSON.parse(message.content)); } catch {}
+    }
     const lastUser = [...messages].reverse().find(message => message.role === "user");
     const userText = lastUser?.content || "";
     const tools = (data.tools || []).map(tool => tool.function.name);
@@ -161,7 +166,7 @@ async function main() {
     assert.match(bridge.endpoint, /^http:\/\/127\.0\.0\.1:/);
     const bridgeHealth = await fetch(bridge.endpoint + "/health", { headers: { authorization: `Bearer ${bridge.token}` } });
     assert.equal(bridgeHealth.status, 200);
-    assert.equal((await bridgeHealth.json()).version, "0.1.2");
+    assert.equal((await bridgeHealth.json()).version, "0.1.3");
     console.log("Discussion plugin:", JSON.stringify((await oc("/api/plugin")).data.find(plugin => plugin.id === "multi-agent-discussion")));
     await until(async () => (await service("GET", "/models")).models.some(model => model.providerID === "probe"), "model catalog");
 
@@ -246,7 +251,7 @@ async function main() {
 
     const health = await oc("/api/rpc/multi-agent-discussion/health", { input: {} }, "POST");
     assert.equal((health.output || health.data || health).plugin, "multi-agent-discussion");
-    assert.equal((health.output || health.data || health).version, "0.1.2");
+    assert.equal((health.output || health.data || health).version, "0.1.3");
 
     const first = await service("POST", `/rooms/${roomId}/messages`, { text: "真人首帖：请审查这个方案。" });
     try {
@@ -270,6 +275,16 @@ async function main() {
     await oc(`/api/session/${a.sessionId}/prompt`, { text: "CALL_POST" });
     await until(() => toolCalls.some(call => call.name === "room_post"), "agent room_post tool");
     await until(async () => (await service("GET", `/rooms/${roomId}/timeline`)).items.some(message => message.text === "Agent 的真实发言"), "agent post stored");
+    const postResult = await until(() => deliveredRoomResults.find(result => result?.status === "stored" && result.timeline?.some(message => message.text === "Agent 的真实发言")), "model receives the post and recent messages");
+    assert.equal(postResult.checkDecision, undefined);
+    assert.equal(postResult.presentation, undefined);
+    assert.equal(postResult.timeline.at(-1).label, undefined);
+    const storedTool = await until(async () => {
+      const context = await oc(`/api/session/${a.sessionId}/context`);
+      return context.data.flatMap(message => message.type === "assistant" ? message.content : [])
+        .find(part => part.type === "tool" && part.name === "room_post" && part.state.metadata?.discussionPresentationId);
+    }, "post receipt metadata persisted outside the model output");
+    assert.match(storedTool.state.metadata.discussionPresentationId, /^p_/);
     await until(async () => {
       const state = await service("GET", `/rooms/${roomId}`);
       return state.reminders.some(reminder => reminder.kind === "queue" && reminder.status === "accepted" && reminder.snapshotSeq > first.roomSeq);

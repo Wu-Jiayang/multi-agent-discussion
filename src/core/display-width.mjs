@@ -2,6 +2,9 @@ import GraphemerModule from "graphemer";
 import emojiRegexModule from "emoji-regex";
 import unicode from "./unicode-15.json" with { type: "json" };
 import { RoomError } from "./errors.mjs";
+import { MAX_AGENT_MESSAGE_WIDTH } from "./message-limits.mjs";
+
+export { MAX_AGENT_MESSAGE_WIDTH };
 
 let Graphemer = GraphemerModule;
 while (Graphemer?.default) Graphemer = Graphemer.default;
@@ -14,7 +17,6 @@ const splitter = new Graphemer();
 const emoji = new RegExp(emojiRegex().source, "u");
 
 export const UNICODE_IMPLEMENTATION = "Unicode 15.0.0 + graphemer@1.4.0 + emoji-regex@10.2.0";
-export const MAX_AGENT_MESSAGE_WIDTH = 100;
 
 function inRanges(codePoint, ranges) {
   let low = 0;
@@ -54,7 +56,7 @@ export function displayWidth(input) {
 export function assertAgentWidth(text, label = "message") {
   const actual = displayWidth(text);
   if (actual > MAX_AGENT_MESSAGE_WIDTH) {
-    throw new RoomError("ROOM_MESSAGE_TOO_LONG", `${label} display width ${actual}; max ${MAX_AGENT_MESSAGE_WIDTH}. Shorten and retry.`, { actual, max: MAX_AGENT_MESSAGE_WIDTH }, 422);
+    throw new RoomError("ROOM_MESSAGE_TOO_LONG", `${label} is ${actual} display columns; the limit is ${MAX_AGENT_MESSAGE_WIDTH}. Most Chinese characters use two columns. Shorten and retry.`, { actual, max: MAX_AGENT_MESSAGE_WIDTH }, 422);
   }
   return actual;
 }

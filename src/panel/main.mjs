@@ -4,6 +4,7 @@ import { applyHostReady, mountBanner, mountButton, mountEmpty, mountList, mountS
 const host = connectHost();
 const $ = selector => document.querySelector(selector);
 const app = $("#app");
+const pausingRooms = new Set();
 const state = {
   directory: null, projectDir: null, projectId: null, projectManual: false,
   projects: [], projectsState: "loading", projectsError: null,
@@ -36,7 +37,14 @@ function showError(error) {
 }
 function clearError() { $("#error").hidden = true; }
 async function request(method, path, body, query) {
-  const result = await host.serviceRequest({ method, path, query: query && Object.fromEntries(Object.entries(query).filter(([, value]) => value != null && value !== "").map(([key, value]) => [key, String(value)])), body: body == null ? undefined : JSON.stringify(body) });
+  const startedAt = performance.now();
+  let result;
+  try {
+    result = await host.serviceRequest({ method, path, query: query && Object.fromEntries(Object.entries(query).filter(([, value]) => value != null && value !== "").map(([key, value]) => [key, String(value)])), body: body == null ? undefined : JSON.stringify(body) });
+  } catch (error) {
+    console.warn("[discussion] host request failed", { method, path, elapsedMs: Math.round(performance.now() - startedAt), code: error?.code });
+    throw error;
+  }
   let data = null;
   try { data = result.body ? JSON.parse(result.body) : null; } catch {}
   if (result.status >= 400) {
@@ -68,6 +76,7 @@ function renderRoomSelect() {
 let projectSelectHandle = null;
 let projectsLoaded = false;
 let projectsSubscribed = false;
+let resolvingRootSession = false;
 const modelHandles = new Map();
 let agentUid = 0;
 
@@ -135,6 +144,7 @@ function applyProjectsSnapshot(snapshot) {
     return;
   }
   state.projects = nextProjects;
+  if (resolvingRootSession) return;
   resolveProjectSelection();
   updateProjectPicker();
   if (state.projectDir !== previousDir) void reloadProjectContext();
@@ -217,7 +227,7 @@ function memberIssuePills(member) {
 }
 function pausedReasonText(room) {
   if (room.pausedReason === "provider-quota") return "模型额度或余额不足，自动唤醒已暂停。充值或更换模型后点击继续房间。";
-  return `自动唤醒已暂停（${room.pausedReason === "budget" ? "额度用尽" : "手动暂停"}）。发帖、阅读和提问仍可使用。`;
+  return `自动唤醒已暂停（${room.pausedReason === "budget" ? "额度用尽" : "手动暂停"}）。已提交的唤醒和正在运行的回合仍会继续。发帖、阅读和提问仍可使用。`;
 }
 function modelSelectOptions() {
   return state.models.map(model => ({
@@ -471,18 +481,23 @@ function renderRoomHeader() {
   const room = state.room;
   if (!room) return;
   const paused = room.status === "paused";
+  const pausing = pausingRooms.has(room.roomId);
+  const running = room.members.filter(member => member.sessionStatus === "running").length;
+  const submitting = room.reminders?.filter(reminder => reminder.status === "submitting").length || 0;
+  const remainingActivity = [running ? `${running} 位成员仍在运行` : "", submitting ? `${submitting} 次唤醒正在提交` : ""].filter(Boolean).join("，");
   const rootStatus = room.rootCreationStatus;
   const rootPill = rootStatus === "ready" ? "running" : rootStatus === "failed" ? "unknown" : "waiting-human";
-  const rootChip = rootStatus || room.rootSessionId ? `<span class="member-chip root-session"><span>根会话</span>${rootStatus ? `<span class="pill ${rootPill}">${escape(rootStatusLabels[rootStatus] || rootStatus)}</span>` : ""}${room.rootSessionId ? `<button data-action="open-root-session" data-session="${escape(room.rootSessionId)}">会话组</button>` : ""}</span>` : "";
+  const rootChip = rootStatus || room.rootSessionId ? `<span class="member-chip root-session"><span>根会话</span>${rootStatus ? `<span class="pill ${rootPill}">${escape(rootStatusLabels[rootStatus] || rootStatus)}</span>` : ""}${room.rootSessionId ? `<button data-action="open-root-session" data-session="${escape(room.rootSessionId)}">查看根会话</button>` : ""}</span>` : "";
   $("#room-header").innerHTML = `
     <div><div class="room-title">${escape(room.title)}</div><div class="member-list">${rootChip}<span class="member-chip"><span>${escape(room.human.displayName)}</span><span class="pill">人类 · 房主</span></span>${room.members.map(member => `<span class="member-chip"><span>${escape(member.displayName)}</span>${memberModelPill(member)}${member.creationStatus === "failed" || member.creationError ? `<span class="pill error">创建失败：${escape(member.creationError || "未知原因")}</span>` : `${member.taskError ? `<span class="pill waiting-human">会话同步失败：${escape(member.taskError)}</span>` : ""}${memberIssuePills(member)}<span class="pill ${escape(member.sessionStatus)}">${escape(statusLabels[member.sessionStatus] || member.sessionStatus)}</span>`}${member.sessionId ? `<button data-action="open-session" data-session="${escape(member.sessionId)}">会话</button>` : ""}<button data-action="change-model" data-member="${escape(member.memberId)}">换模型</button></span>`).join("")}</div></div>
     <div class="room-controls">
       <button class="button ghost" data-action="open-workspace">文件</button>
       <span class="pill budget">余额 ${room.budget.remaining}/${room.budget.limit} · 第 ${room.budget.period} 段</span>
-      ${room.status === "creating" ? `<button class="button secondary" data-action="retry">重试缺失会话</button>` : room.status !== "ended" ? `${paused ? `<button class="button primary" data-action="resume">继续房间</button>` : `<button class="button secondary" data-action="pause">暂停唤醒</button>`}<button class="button ghost danger" data-action="end">结束房间</button>` : ""}
+      ${room.status === "creating" ? `<button class="button secondary" data-action="retry">重试缺失会话</button>` : room.status !== "ended" ? `${paused ? `<button class="button primary" data-action="resume">继续房间</button>` : `<button class="button secondary" data-action="pause"${pausing ? " disabled" : ""}>${pausing ? "正在暂停…" : "暂停唤醒"}</button>`}<button class="button ghost danger" data-action="end">结束房间</button>` : ""}
     </div>
     ${rootStatus === "failed" ? `<div class="root-error">根会话创建失败：${escape(room.rootCreationError || "未知原因")}</div>` : ""}
     ${paused && room.status !== "creating" ? `<div class="composer-hint${room.pausedReason === "provider-quota" ? " provider-quota" : ""}">${escape(pausedReasonText(room))}</div>` : ""}
+    ${paused && remainingActivity ? `<div class="composer-hint">${escape(remainingActivity)}。</div>` : ""}
   `;
 }
 function renderAuthorFilter() {
@@ -516,7 +531,11 @@ function renderMessage(message) {
   const own = message.isOwn ? "own" : "";
   const anchor = state.chatAnchor === message.messageId ? "anchor" : "";
   const question = message.questionId ? `<div class="question-card"><span class="pill">问题 · ${escape(message.questionStatus || "pending")}</span>${message.options?.length ? `<ol class="options">${message.options.map(option => `<li>${escape(option)}</li>`).join("")}</ol>` : ""}${message.answerMessageId ? `<button class="button ghost" data-action="open-message" data-message="${escape(message.answerMessageId)}">打开答案</button>` : ""}</div>` : "";
-  const quote = message.replyTo ? `<div class="quote" data-action="open-message" data-message="${escape(message.replyTo.messageId)}" ${message.replyTo.full ? `data-full-message-id="${escape(message.replyTo.messageId)}"` : ""}><div class="quote-label">${escape(message.replyTo.label)}</div><div class="quote-text">${renderText(message.replyTo.text || "原帖不可用或已删除。")}</div></div>` : "";
+  const reply = message.replyTo;
+  const quoteText = reply?.text?.replace(/\s+/g, " ").trim() || "原帖不可用或已删除。";
+  const quote = !reply ? "" : reply.unavailable
+    ? `<span class="quote">${escape(quoteText)}</span>`
+    : `<button type="button" class="quote" data-action="open-message" data-message="${escape(reply.messageId)}"><span class="quote-text">${escape(`${reply.author.displayName}：${quoteText}`)}</span></button>`;
   const mentions = message.mentions?.length || message.mentionAll ? `<span class="mentions">${message.mentionAll ? `<span class="mention">@所有人</span>` : ""}${(message.mentions || []).map(member => `<span class="mention">@${escape(member.display_name)}</span>`).join("")}</span>` : "";
   return `<article class="message ${message.author.kind} ${own} ${anchor}" data-message-row="${escape(message.messageId)}">
     <div class="avatar">${escape(message.author.displayName.slice(0, 1))}</div>
@@ -1026,11 +1045,26 @@ app.addEventListener("click", async event => {
   }
   if (action === "pause" || action === "resume" || action === "retry" || action === "end") {
     if (action === "end") { showEndRoomConfirmation(); return; }
+    const roomId = state.roomId;
+    if (!roomId || state.room?.roomId !== roomId) return;
+    if (action === "pause") {
+      if (pausingRooms.has(roomId)) return;
+      pausingRooms.add(roomId);
+      renderRoomHeader();
+    }
     try {
-      await request("POST", `/rooms/${encodeURIComponent(state.roomId)}/${action}`, action === "resume" ? { budgetLimit: state.room?.budget.limit || 50 } : undefined);
+      await request("POST", `/rooms/${encodeURIComponent(roomId)}/${action}`, action === "resume" ? { budgetLimit: state.room?.budget.limit || 50 } : undefined);
+      if (state.roomId !== roomId) return;
       await refreshRoom();
       if (action === "resume") await loadTimeline(true);
-    } catch (error) { showError(error); }
+    } catch (error) {
+      if (state.roomId === roomId) showError(error);
+    } finally {
+      if (action === "pause") {
+        pausingRooms.delete(roomId);
+        if (state.roomId === roomId) renderRoomHeader();
+      }
+    }
     return;
   }
   if (action === "open-session" || action === "open-root-session") { persistView(); await host.openSession(button.dataset.session); return; }
@@ -1118,31 +1152,67 @@ $("#modal").addEventListener("close", () => { disposeModalSdk(); fileBrowser = n
 document.querySelectorAll(".mobile-tabs button").forEach(button => button.addEventListener("click", () => { state.mobilePane = button.dataset.pane; $("#room-view").dataset.mobilePane = state.mobilePane; document.querySelectorAll(".mobile-tabs button").forEach(item => item.classList.toggle("active", item === button)); persistView(); }));
 document.addEventListener("keydown", event => { if (event.key === "Escape") hideMentionMenu(); });
 
-let refreshTimer = 0;
+const REFRESH_INTERVAL_MS = 1800;
+const MAX_REFRESH_BACKOFF_MS = 30000;
+let roomRefresh = null;
+
 async function refreshOpenRoom() {
-  if (document.hidden || (!state.projectDir && !state.roomId)) return;
-  clearTimeout(refreshTimer);
+  if (document.hidden) return;
+  const roomId = state.creating ? null : state.roomId;
+  const generation = state.contextGeneration;
+  if (roomRefresh?.roomId !== roomId || roomRefresh?.generation !== generation) {
+    clearTimeout(roomRefresh?.timer);
+    roomRefresh = roomId ? { roomId, generation, timer: null, running: false, failures: 0, retryAt: 0 } : null;
+    $("#refresh-error").hidden = true;
+  }
+  if (!state.projectDir && !roomId) return;
   if (!state.models.length && !state.modelsLoading && state.modelsForProject !== state.projectDir) await refreshModels(false);
-  if (!state.roomId || state.creating) return;
-  refreshTimer = setTimeout(async () => {
+  const refresh = roomRefresh;
+  if (!refresh || refresh.roomId !== roomId || refresh.generation !== generation
+      || refresh.timer !== null || refresh.running || Date.now() < refresh.retryAt) return;
+  const isCurrent = () => roomRefresh === refresh && state.roomId === roomId && state.contextGeneration === generation && !state.creating;
+  refresh.timer = setTimeout(async () => {
+    refresh.timer = null;
+    if (!isCurrent() || document.hidden) return;
+    refresh.running = true;
     try {
       await refreshRoom();
+      if (!isCurrent()) return;
       if (!state.chatAnchor && state.followLatest) await loadTimeline();
+      if (!isCurrent()) return;
       await loadQuestions();
-    } catch (error) { showError(error); }
+      if (!isCurrent()) return;
+      refresh.failures = 0;
+      refresh.retryAt = 0;
+      $("#refresh-error").hidden = true;
+    } catch {
+      if (!isCurrent()) return;
+      refresh.failures += 1;
+      refresh.retryAt = Date.now() + Math.min(MAX_REFRESH_BACKOFF_MS, REFRESH_INTERVAL_MS * 2 ** refresh.failures);
+      $("#refresh-error").hidden = false;
+    } finally {
+      refresh.running = false;
+    }
   }, 80);
 }
 host.onServiceEvent(event => {
   if (event.topic === "room:changed") void refreshOpenRoom();
   if (event.topic === "models:changed") void refreshModels(true);
 });
-setInterval(() => void refreshOpenRoom(), 1800);
+setInterval(() => void refreshOpenRoom(), REFRESH_INTERVAL_MS);
 
 mountProjectPicker();
 
 let readyGeneration = 0;
+let rootSessionOpened = false;
 host.onReady(async ctx => {
   applyHostReady(ctx, document.documentElement);
+  const rootSession = ctx.item?.kind === "session" && ctx.item.action === "discussion-room" ? ctx.item : null;
+  if (rootSession && rootSessionOpened) return;
+  if (rootSession) {
+    rootSessionOpened = true;
+    resolvingRootSession = true;
+  }
   const generation = ++readyGeneration;
   const directoryChanged = ctx.directory !== state.directory;
   const previousProjectDir = state.projectDir;
@@ -1152,6 +1222,35 @@ host.onReady(async ctx => {
     projectsLoaded = true;
     subscribeProjects();
     void loadProjects();
+  }
+  if (rootSession) {
+    let target, saved;
+    try {
+      [target, saved] = await Promise.all([
+        request("GET", "/room-for-root-session", null, { sessionId: rootSession.sessionId }),
+        host.storage.get("discussion-view").catch(() => null),
+      ]);
+    } catch (error) {
+      try { await host.openSession(rootSession.sessionId); }
+      catch { showError(error); }
+      return;
+    } finally {
+      resolvingRootSession = false;
+    }
+    try {
+      state.directory = target.projectDir;
+      state.projectDir = target.projectDir;
+      if (saved?.roomId === target.roomId) {
+        state.pendingView = saved;
+        if (saved.questionStatus) state.questionStatus = saved.questionStatus;
+        if (saved.mobilePane) state.mobilePane = saved.mobilePane;
+      }
+      resolveProjectSelection();
+      updateProjectPicker();
+      const context = ++state.contextGeneration;
+      await Promise.all([refreshModels(true, context), loadRooms(target.roomId, context)]);
+    } catch (error) { showError(error); }
+    return;
   }
   if (directoryChanged) {
     if (!state.projectManual) { state.projectDir = ctx.directory; state.projectId = null; }

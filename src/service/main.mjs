@@ -10,7 +10,7 @@ import { RoomEngine } from "../core/room-engine.mjs";
 import { asRoomError, RoomError } from "../core/errors.mjs";
 import { MAX_AGENT_MESSAGE_WIDTH, UNICODE_IMPLEMENTATION } from "../core/display-width.mjs";
 
-const VERSION = "0.1.2";
+const VERSION = "0.1.3";
 const MAX_BODY = 1024 * 1024;
 
 function packageRoot() {
@@ -238,6 +238,9 @@ export function createDiscussionService(options = {}) {
       return json(res, 200, { ok: true });
     }
     if (req.method === "GET" && url.pathname === "/meta") return json(res, 200, { humanName: defaultHumanName() });
+    if (req.method === "GET" && url.pathname === "/room-for-root-session") {
+      return json(res, 200, store.roomForRootSession(query(url).sessionId || ""));
+    }
     if (req.method === "GET" && url.pathname === "/models") {
       const directory = query(url).directory;
       const scoped = directory ? modelCatalogs.get(directory) : undefined;

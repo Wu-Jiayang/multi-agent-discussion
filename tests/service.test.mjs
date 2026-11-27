@@ -81,7 +81,7 @@ test("HTTP service authenticates host/plugin separately and creates rooms withou
     const unauthenticated = await fetch(`http://127.0.0.1:${f.service.server.address().port}/health`);
     assert.equal(unauthenticated.status, 401);
     assert.equal(typeof (await f.call("GET", "/meta")).data.humanName, "string");
-    assert.equal((await f.call("GET", "/health")).data.version, "0.1.2");
+    assert.equal((await f.call("GET", "/health")).data.version, "0.1.3");
     assert.equal((await f.call("GET", "/plugin/work", null, true)).status, 200);
     assert.equal((await f.call("GET", "/rooms", null, true)).status, 404);
     await f.call("POST", "/plugin/catalog", { models: [{ providerID: "probe", id: "fake", name: "Fake" }] }, true);
@@ -103,6 +103,11 @@ test("HTTP service authenticates host/plugin separately and creates rooms withou
     const memberJobs = jobs.filter(job => job.type === "create-session");
     assert.ok(memberJobs.every(job => job.metadata.openchamber.kind === "operator-child"));
     assert.ok(memberJobs.every(job => job.metadata.openchamber.parentID === created.rootSessionId));
+    const target = await f.call("GET", `/room-for-root-session?sessionId=${created.rootSessionId}`);
+    assert.deepEqual(target, { status: 200, data: { roomId: created.roomId, projectDir: realpathSync(f.root) } });
+    const memberTarget = await f.call("GET", `/room-for-root-session?sessionId=${memberJobs[0].sessionId}`);
+    assert.equal(memberTarget.status, 404);
+    assert.equal(memberTarget.data.error.code, "ROOM_NOT_FOUND");
     const room = (await f.call("GET", `/rooms/${created.roomId}`)).data;
     assert.equal(room.status, "ready");
     assert.equal(room.rootCreationStatus, "ready");
@@ -175,7 +180,15 @@ test("plugin tools, presentation receipts, questions and safe workspace previews
     const answered = (await f.call("GET", `/rooms/${created.roomId}/questions?status=answered`)).data.items[0];
     assert.ok(answered.answerMessageId);
     assert.notEqual(answered.answerMessageId, asked.messageId);
-    const tooLong = await f.call("POST", "/plugin/tool", { sessionID: a.sessionId, name: "room_post", input: { text: "界".repeat(51) } }, true);
+    const post = async text => (await f.call("POST", "/plugin/tool", { sessionID: a.sessionId, name: "room_post", input: { text } }, true)).data;
+    const firstText = "界".repeat(100);
+    const first = await post(firstText);
+    const second = await post("补充一条");
+    assert.equal(first.status, "stored");
+    assert.equal(second.status, "stored");
+    assert.equal(second.roomSeq, first.roomSeq + 1);
+    assert.deepEqual(second.timeline.slice(-2).map(row => row.text), [firstText, "补充一条"]);
+    const tooLong = await f.call("POST", "/plugin/tool", { sessionID: a.sessionId, name: "room_post", input: { text: firstText + "a" } }, true);
     assert.equal(tooLong.status, 422);
     assert.equal(tooLong.data.error.code, "ROOM_MESSAGE_TOO_LONG");
 

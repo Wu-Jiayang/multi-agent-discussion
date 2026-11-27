@@ -9225,6 +9225,9 @@ function asRoomError(error) {
   return error instanceof RoomError ? error : new RoomError("ROOM_INTERNAL_ERROR", error?.message || "Unexpected room error", {}, 500);
 }
 
+// src/core/message-limits.mjs
+var MAX_AGENT_MESSAGE_WIDTH = 200;
+
 // src/core/display-width.mjs
 var Graphemer = import_graphemer.default;
 while (Graphemer?.default) Graphemer = Graphemer.default;
@@ -9233,7 +9236,6 @@ while (emojiRegex?.default) emojiRegex = emojiRegex.default;
 var splitter = new Graphemer();
 var emoji = new RegExp(emojiRegex().source, "u");
 var UNICODE_IMPLEMENTATION = "Unicode 15.0.0 + graphemer@1.4.0 + emoji-regex@10.2.0";
-var MAX_AGENT_MESSAGE_WIDTH = 100;
 function inRanges(codePoint, ranges) {
   let low = 0;
   let high = ranges.length - 1;
@@ -9273,13 +9275,14 @@ function displayWidth(input) {
 function assertAgentWidth(text, label = "message") {
   const actual = displayWidth(text);
   if (actual > MAX_AGENT_MESSAGE_WIDTH) {
-    throw new RoomError("ROOM_MESSAGE_TOO_LONG", `${label} display width ${actual}; max ${MAX_AGENT_MESSAGE_WIDTH}. Shorten and retry.`, { actual, max: MAX_AGENT_MESSAGE_WIDTH }, 422);
+    throw new RoomError("ROOM_MESSAGE_TOO_LONG", `${label} is ${actual} display columns; the limit is ${MAX_AGENT_MESSAGE_WIDTH}. Most Chinese characters use two columns. Shorten and retry.`, { actual, max: MAX_AGENT_MESSAGE_WIDTH }, 422);
   }
   return actual;
 }
 
 // src/core/room-store.mjs
-var RULES_VERSION = "room-rules-2026-11-26";
+var PREVIOUS_RULES_VERSIONS = ["room-rules-2026-11-26", "room-rules-2026-11-27"];
+var RULES_VERSION = "room-rules-2026-11-27-chat";
 var ROLE_LABELS = { generic: "\u901A\u7528", proposer: "\u63D0\u6848\u8005", reviewer: "\u5BA1\u67E5\u8005", moderator: "\u4E3B\u6301\u4EBA" };
 var QUESTION_STATUSES = /* @__PURE__ */ new Set(["pending", "answered", "withdrawn"]);
 var ROLE_INSTRUCTIONS = {
@@ -9288,12 +9291,13 @@ var ROLE_INSTRUCTIONS = {
   reviewer: "\u517C\u505A\u6838\u9A8C\u3002\u68C0\u67E5\u5173\u952E\u5047\u8BBE\uFF0C\u6309\u9700\u67E5\u8D44\u6599\u3001\u627E\u53CD\u4F8B\u6216\u8DD1\u6D4B\u8BD5\u3002\u8BF4\u6E05\u5DF2\u9A8C\u8BC1\u7684\u7ED3\u8BBA\u3001\u5C1A\u672A\u786E\u8BA4\u7684\u98CE\u9669\uFF0C\u4EE5\u53CA\u4EC0\u4E48\u8BC1\u636E\u80FD\u6539\u53D8\u5224\u65AD\uFF1B\u4E0D\u4E3A\u53CD\u5BF9\u800C\u53CD\u5BF9\u3002",
   moderator: "\u6839\u636E\u8BFB\u5230\u7684\u53D1\u8A00\u5F52\u7EB3\u5171\u8BC6\u3001\u5206\u6B67\u548C\u4E0B\u4E00\u6B65\u3002\u8BA8\u8BBA\u8DD1\u9898\u6216\u91CD\u590D\u65F6\uFF0C\u6307\u51FA\u5DF2\u8BA8\u8BBA\u8FC7\u7684\u5185\u5BB9\u5E76\u62C9\u56DE\u5C1A\u672A\u89E3\u51B3\u7684\u95EE\u9898\u3002\u6210\u5458\u7070\u5FC3\u6216\u8FF7\u832B\u65F6\u80AF\u5B9A\u5DF2\u6709\u8FDB\u5C55\uFF0C\u5FC5\u8981\u65F6\u5EFA\u8BAE\u5BB9\u6613\u5C1D\u8BD5\u7684\u4E0B\u4E00\u6B65\u3002\u4E0D\u4EE3\u66FF\u6210\u5458\u51B3\u5B9A\uFF0C\u4E0D\u628A\u6C89\u9ED8\u5F53\u6210\u540C\u610F\u3002"
 };
-var COMMON_RULES = `\u6536\u5230\u623F\u95F4\u63D0\u9192\u540E\uFF0C\u5148\u8BFB\u76F8\u5173\u672A\u8BFB\u6D88\u606F\uFF08\u53EF\u7528 room_unread()\uFF09\u3002\u88AB\u5524\u9192\u3001\u88AB @ \u6216\u8BFB\u5B8C\u6D88\u606F\uFF0C\u90FD\u4E0D\u8981\u6C42\u4F60\u53D1\u8A00\u3002\u6709\u65B0\u89C2\u70B9\u3001\u8BC1\u636E\u3001\u53CD\u4F8B\u6216\u503C\u5F97\u56DE\u7B54\u7684\u95EE\u9898\u65F6\u518D\u53D1\u5E16\u3002\u6CA1\u6709\u65B0\u5185\u5BB9\uFF0C\u5C31\u7EE7\u7EED\u539F\u4EFB\u52A1\u6216\u7ED3\u675F\u672C\u8F6E\uFF1B\u4E0D\u8981\u53EA\u56DE\u300C\u6536\u5230\u300D\u6216\u91CD\u590D\u522B\u4EBA\u7684\u7ED3\u8BBA\u3002
-\u9700\u8981\u5BF9\u65B9\u5C3D\u5FEB\u6CE8\u610F\u65F6\uFF0C\u4ECE\u4F1A\u8BDD\u6307\u4EE4\u91CC\u7684\u6210\u5458\u540D\u5355\u627E\u5230\u5BF9\u65B9\u7684 ID\uFF0C\u518D\u7528 room_post \u6216 room_ask \u7684 mentionMemberIds \u70B9\u540D\u3002\u9700\u8981\u91CD\u67E5\u540D\u5355\u65F6\u7528 room_members()\u3002\u53EA\u5728\u6B63\u6587\u5199 @\u663E\u793A\u540D \u4E0D\u4F1A\u70B9\u540D\u3002\u666E\u901A\u63A5\u8BDD\u7528 replyToMessageId \u5F15\u7528\u5373\u53EF\uFF1B\u53EA\u6709\u786E\u5B9E\u9700\u8981\u901A\u77E5\u6240\u6709\u4EBA\u624D\u4F20 mentionAll: true\u3002
-\u9700\u8981\u771F\u4EBA\u56DE\u7B54\u65F6\u7528 room_ask\uFF0C\u5305\u62EC\u5355\u9009\u95EE\u9898\uFF1B\u53EA\u6709\u771F\u4EBA\u53EF\u4EE5\u6B63\u5F0F\u4F5C\u7B54\u3002\u95EE\u540C\u4F34\u7528 room_post\uFF0C\u9700\u8981\u5C3D\u5FEB\u6CE8\u610F\u65F6\u624D\u70B9\u540D\u3002\u4E0D\u8981\u5728\u72EC\u7ACB\u4F1A\u8BDD\u4E2D\u8C03\u7528 OpenCode \u539F\u751F\u63D0\u95EE\u5DE5\u5177\uFF1B\u53D1\u51FA\u623F\u95F4\u95EE\u9898\u540E\u53EF\u7EE7\u7EED\u5DE5\u4F5C\u6216\u7ED3\u675F\u672C\u8F6E\u3002
+var COMMON_RULES = `\u6536\u5230\u623F\u95F4\u63D0\u9192\u540E\uFF0C\u5148\u8BFB\u76F8\u5173\u672A\u8BFB\u6D88\u606F\u3002\u88AB\u5524\u9192\u3001\u88AB @ \u6216\u8BFB\u5B8C\u6D88\u606F\uFF0C\u90FD\u4E0D\u8981\u6C42\u4F60\u53D1\u8A00\u3002\u6709\u65B0\u89C2\u70B9\u3001\u8BC1\u636E\u3001\u53CD\u4F8B\u6216\u503C\u5F97\u56DE\u7B54\u7684\u95EE\u9898\u65F6\u518D\u53D1\u5E16\u3002\u6CA1\u6709\u65B0\u5185\u5BB9\uFF0C\u5C31\u7EE7\u7EED\u539F\u4EFB\u52A1\u6216\u7ED3\u675F\u672C\u8F6E\uFF1B\u4E0D\u8981\u53EA\u56DE\u300C\u6536\u5230\u300D\u6216\u91CD\u590D\u522B\u4EBA\u7684\u7ED3\u8BBA\u3002
+\u50CF\u5728\u9879\u76EE\u7FA4\u91CC\u63A5\u8BDD\u3002\u6709\u4EBA\u95EE\u4F60\uFF0C\u5148\u76F4\u63A5\u56DE\u7B54\uFF0C\u7528\u5BF9\u65B9\u542C\u5F97\u61C2\u7684\u8BDD\u8BF4\u91CD\u70B9\u3002\u522B\u4EBA\u5DF2\u7ECF\u8BF4\u6E05\u695A\u4E86\uFF0C\u5C31\u53EA\u8865\u4F1A\u6539\u53D8\u5224\u65AD\u7684\u65B0\u4FE1\u606F\u3002\u8D34\u6587\u6863\u65F6\uFF0C\u628A\u6700\u91CD\u8981\u7684\u7ED3\u8BBA\u7559\u5728\u7FA4\u91CC\u3002
+\u9700\u8981\u5BF9\u65B9\u5C3D\u5FEB\u6CE8\u610F\u65F6\u624D\u70B9\u540D\uFF1B\u53EA\u6709\u786E\u5B9E\u9700\u8981\u901A\u77E5\u6240\u6709\u4EBA\u65F6\u624D\u70B9\u540D\u5168\u4F53\u3002
+\u9700\u8981\u771F\u4EBA\u56DE\u7B54\u65F6\u5728\u623F\u95F4\u91CC\u63D0\u95EE\uFF1B\u53EA\u6709\u771F\u4EBA\u53EF\u4EE5\u6B63\u5F0F\u4F5C\u7B54\u3002\u95EE\u540C\u4F34\u7528\u666E\u901A\u623F\u95F4\u6D88\u606F\u3002\u4E0D\u8981\u5728\u72EC\u7ACB\u4F1A\u8BDD\u4E2D\u8C03\u7528 OpenCode \u539F\u751F\u63D0\u95EE\u5DE5\u5177\uFF1B\u53D1\u51FA\u623F\u95F4\u95EE\u9898\u540E\u53EF\u7EE7\u7EED\u5DE5\u4F5C\u6216\u7ED3\u675F\u672C\u8F6E\u3002
 \u8BFB\u5B8C\u4F46\u4E0D\u53D1\u5E16\u662F\u6B63\u5E38\u884C\u4E3A\uFF0C\u4E0D\u9700\u8981\u53D1\u300C\u8DF3\u8FC7\u300D\u6D88\u606F\uFF0C\u4E5F\u4E0D\u89E6\u53D1\u5176\u4ED6\u6210\u5458\u3002\u6CA1\u8BFB\u5C31\u7ED3\u675F\u4ECD\u4F1A\u6309\u672A\u8BFB\u89C4\u5219\u63D0\u9192\uFF1B\u6C89\u9ED8\u4E0D\u6539\u53D8\u5DF2\u8BFB\u72B6\u6001\uFF0C\u4E0D\u8868\u793A\u540C\u610F\u3002`;
 var SCENARIO_INSTRUCTIONS = {
-  debate: "\u5F53\u524D\u662F\u53CC\u6A21\u578B\u8FA9\u8BBA\u3002\u521D\u59CB\u7ACB\u573A\u53EA\u662F\u8D77\u70B9\uFF0C\u53EF\u968F\u8BC1\u636E\u53D8\u5316\u3002\u6BCF\u5E16\u53EA\u5199\u4E00\u4E2A\u4E3B\u5F20\u3001\u53CD\u4F8B\u6216\u4FEE\u8BA2\uFF1B\u4F18\u5148\u5F15\u7528\u5BF9\u65B9\u539F\u5E16\u3002\u6CA1\u6709\u65B0\u5185\u5BB9\u53EF\u4EE5\u6C89\u9ED8\u3002\u6536\u5C3E\u65F6\u5404\u53D1\u4E00\u6761\u603B\u7ED3\uFF0C\u8BF4\u660E\u4FEE\u6539\u4E86\u4EC0\u4E48\u6216\u4ECD\u5206\u6B67\u5728\u54EA\u91CC\u3002"
+  debate: "\u5F53\u524D\u662F\u53CC\u6A21\u578B\u8FA9\u8BBA\u3002\u521D\u59CB\u7ACB\u573A\u53EA\u662F\u8D77\u70B9\uFF0C\u53EF\u968F\u8BC1\u636E\u53D8\u5316\u3002\u6BCF\u5E16\u53EA\u5199\u4E00\u4E2A\u4E3B\u5F20\u3001\u53CD\u4F8B\u6216\u4FEE\u8BA2\u3002\u6CA1\u6709\u65B0\u5185\u5BB9\u53EF\u4EE5\u6C89\u9ED8\u3002\u6536\u5C3E\u65F6\u5404\u53D1\u4E00\u6761\u603B\u7ED3\uFF0C\u8BF4\u660E\u4FEE\u6539\u4E86\u4EC0\u4E48\u6216\u4ECD\u5206\u6B67\u5728\u54EA\u91CC\u3002"
 };
 function json(value) {
   return JSON.stringify(value);
@@ -9483,6 +9487,12 @@ var RoomStore = class {
     if (previousSchema < schemaVersion) {
       this.db.prepare("INSERT INTO meta(key,value) VALUES('schema',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(schemaVersion));
     }
+    this.tx(() => {
+      this.db.prepare(`UPDATE members SET instructions_added=0 WHERE kind='agent' AND room_id IN
+        (SELECT id FROM rooms WHERE status<>'ended' AND rules_version IN (?,?))`).run(...PREVIOUS_RULES_VERSIONS);
+      this.db.prepare(`UPDATE rooms SET rules_version=?,config_json=json_set(config_json,'$.roles',?)
+        WHERE status<>'ended' AND rules_version IN (?,?)`).run(RULES_VERSION, RULES_VERSION, ...PREVIOUS_RULES_VERSIONS);
+    });
   }
   close() {
     this.db.close();
@@ -9505,6 +9515,11 @@ var RoomStore = class {
     const row = this.db.prepare("SELECT * FROM rooms WHERE id=?").get(id2);
     if (!row) fail("ROOM_NOT_FOUND", "Room not found.", { roomId: id2 }, 404);
     return row;
+  }
+  roomForRootSession(sessionId) {
+    const row = this.db.prepare("SELECT id, project_dir FROM rooms WHERE root_session_id=?").get(sessionId);
+    if (!row) fail("ROOM_NOT_FOUND", "Room not found.", {}, 404);
+    return { roomId: row.id, projectDir: row.project_dir };
   }
   member(id2) {
     const row = this.db.prepare("SELECT * FROM members WHERE id=?").get(id2);
@@ -9829,11 +9844,12 @@ ${members.map((m) => `- ${m.display_name} \xB7 ${m.kind === "agent" ? "Agent" : 
       }
       const result = this.insertMessage(roomId, author, { text, kind: "post", replyToMessageId: reply?.id, mentions, mentionAll }, now);
       this.markReadInTx(roomId, author.id, [result.messageId], "author", now);
-      const rows = this.db.prepare("SELECT * FROM messages WHERE room_id=? ORDER BY room_seq DESC LIMIT 8").all(roomId).reverse();
+      const rows = this.sendTimeline(roomId, author.id, source.kind === "agent");
       const view = this.renderRows(roomId, rows, author.id);
       const presentation = this.presentation(roomId, author.id, view.fullMessageIds, now);
       return {
         status: "stored",
+        statusLabel: "\u5DF2\u53D1\u9001",
         messageId: result.messageId,
         roomSeq: result.roomSeq,
         questionId: null,
@@ -9868,10 +9884,11 @@ ${options.join("\n")}` : text, replyToMessageId: reply?.id }, now);
       const result = this.insertMessage(roomId, author, { text, kind: "question", options, replyToMessageId: reply?.id, mentions, mentionAll, questionId }, now);
       this.db.prepare(`INSERT INTO questions(id,room_id,message_id,asker_id,status,options_json,created_at,updated_at) VALUES(?,?,?,?,'pending',?,?,?)`).run(questionId, roomId, result.messageId, author.id, json(options), now, now);
       this.markReadInTx(roomId, author.id, [result.messageId], "author", now);
-      const rows = this.db.prepare("SELECT * FROM messages WHERE room_id=? ORDER BY room_seq DESC LIMIT 8").all(roomId).reverse();
+      const rows = this.sendTimeline(roomId, author.id);
       const view = this.renderRows(roomId, rows, author.id);
       return {
         status: "stored",
+        statusLabel: "\u5DF2\u53D1\u9001",
         messageId: result.messageId,
         roomSeq: result.roomSeq,
         questionId,
@@ -9895,6 +9912,7 @@ ${options.join("\n")}` : text, replyToMessageId: reply?.id }, now);
     const view = this.renderRows(roomId, rows, author.id);
     return {
       status: "review_required",
+      statusLabel: "\u5148\u8BFB\u540E\u53D1",
       messageId: null,
       roomSeq: null,
       questionId: null,
@@ -9904,8 +9922,22 @@ ${options.join("\n")}` : text, replyToMessageId: reply?.id }, now);
       unread: this.unreadSummary(roomId, author.id, view.fullMessageIds),
       presentation: this.presentation(roomId, author.id, view.fullMessageIds, now),
       mentionHint: null,
-      message: "Recent unread messages must be reviewed before posting. The draft was not stored. Read the timeline, then submit again or discard it."
+      message: "Read the recent messages below first. This draft has not been sent; post it again only if it still adds something."
     };
+  }
+  sendTimeline(roomId, authorId, compact = true) {
+    const rows = this.db.prepare("SELECT * FROM messages WHERE room_id=? ORDER BY room_seq DESC LIMIT 8").all(roomId);
+    if (!compact) return rows.reverse();
+    let oldestUnread = 0;
+    let anchor = 0;
+    for (let i = 1; i < rows.length; i += 1) {
+      if (this.hasRead(authorId, rows[i].id)) {
+        if (!anchor) anchor = i;
+      } else {
+        oldestUnread = i;
+      }
+    }
+    return rows.slice(0, Math.max(oldestUnread, anchor) + 1).reverse();
   }
   insertMessage(roomId, author, input, now) {
     const seq = this.db.prepare("SELECT COALESCE(MAX(room_seq),0)+1 AS seq FROM messages WHERE room_id=?").get(roomId).seq;
@@ -10471,14 +10503,14 @@ ${parse(row.options_json, []).map((option, index) => `${index + 1}. ${option}`).
         return { changed: false, member, terminal: true };
       }
       if (type === "succeeded") {
-        this.db.prepare("UPDATE members SET last_status='running',last_terminal_round=execution_round,failure_count=0,last_error=NULL,last_error_at=NULL,wake_backoff_until=NULL WHERE id=?").run(member.id);
+        this.db.prepare("UPDATE members SET last_terminal_round=execution_round,failure_count=0,last_error=NULL,last_error_at=NULL,wake_backoff_until=NULL WHERE id=?").run(member.id);
       } else if (type === "failed") {
         const message = executionErrorMessage(error);
         const failures = member.failure_count + 1;
         const retryAt = new Date(Date.parse(now) + failureBackoffMs(failures)).toISOString();
-        this.db.prepare("UPDATE members SET last_status='running',last_terminal_round=execution_round,failure_count=?,last_error=?,last_error_at=?,wake_backoff_until=? WHERE id=?").run(failures, message, now, retryAt, member.id);
+        this.db.prepare("UPDATE members SET last_terminal_round=execution_round,failure_count=?,last_error=?,last_error_at=?,wake_backoff_until=? WHERE id=?").run(failures, message, now, retryAt, member.id);
       } else {
-        this.db.prepare("UPDATE members SET last_status='running',last_terminal_round=execution_round WHERE id=?").run(member.id);
+        this.db.prepare("UPDATE members SET last_terminal_round=execution_round WHERE id=?").run(member.id);
       }
       return { changed: true, member: this.member(member.id), terminal: true, error: type === "failed" ? executionErrorMessage(error) : null };
     }
@@ -10497,9 +10529,10 @@ ${parse(row.options_json, []).map((option, index) => `${index + 1}. ${option}`).
   pauseRoom(roomId, reason = "manual", now = (/* @__PURE__ */ new Date()).toISOString()) {
     const room = this.room(roomId);
     if (room.status === "ended") fail("ROOM_ENDED", "The room has ended.");
+    if (room.status === "paused" && room.paused_reason === reason) return this.roomSummary(room);
     this.tx(() => {
       this.db.prepare("UPDATE rooms SET status='paused',paused_reason=? WHERE id=?").run(reason, roomId);
-      this.configEvent(roomId, "room-paused", { status: room.status, remaining: room.budget_remaining }, { status: "paused", reason });
+      this.configEvent(roomId, "room-paused", { status: room.status, remaining: room.budget_remaining }, { status: "paused", reason }, now);
     });
     return this.roomSummary(this.room(roomId));
   }
@@ -10725,11 +10758,23 @@ var RoomEngine = class {
     try {
       this.store.recoverExpiredReminders(this.now());
       for (const room of this.store.listRooms()) {
-        if (room.status !== "ready") continue;
+        if (room.status !== "ready" && room.status !== "paused") continue;
         for (const member of this.store.agents(room.roomId)) {
           if (member.creation_status !== "ready") continue;
-          if (!this.store.unreadSummary(room.roomId, member.id, []).unreadCount) continue;
-          await this.recheckMember(room.roomId, member.id);
+          if (room.status === "ready" && this.store.unreadSummary(room.roomId, member.id, []).unreadCount) {
+            if (await this.recheckMember(room.roomId, member.id)) continue;
+          }
+          if (member.last_status !== "running" || await this.queryStatus(member) !== "idle") continue;
+          const current = this.store.member(member.id);
+          if (current.execution_round !== member.execution_round || current.last_status !== "running") continue;
+          const observed = this.store.setSessionStatus(member.session_id, "idle", this.now());
+          this.waitKinds.delete(member.session_id);
+          if (observed.changed) {
+            if (current.last_terminal_round !== current.execution_round) {
+              this.store.diagnostic("session-status-reconciled", { roomId: room.roomId, memberId: member.id, sessionId: member.session_id, status: "idle" });
+            }
+            this.changed(room.roomId);
+          }
         }
       }
     } finally {
@@ -10797,8 +10842,9 @@ var RoomEngine = class {
     return result;
   }
   pause(roomId, reason = "manual") {
+    const previous = this.store.room(roomId);
     const room = this.store.pauseRoom(roomId, reason, this.now());
-    this.changed(roomId);
+    if (previous.status !== room.status || previous.paused_reason !== room.pausedReason) this.changed(roomId);
     return room;
   }
   resume(roomId, budgetLimit = 50) {
@@ -11100,7 +11146,7 @@ var RoomEngine = class {
 };
 
 // src/service/main.mjs
-var VERSION = "0.1.2";
+var VERSION = "0.1.3";
 var MAX_BODY = 1024 * 1024;
 function packageRoot() {
   return resolve(fileURLToPath(new URL("../", import.meta.url)));
@@ -11344,6 +11390,9 @@ function createDiscussionService(options = {}) {
       return json2(res, 200, { ok: true });
     }
     if (req.method === "GET" && url.pathname === "/meta") return json2(res, 200, { humanName: defaultHumanName() });
+    if (req.method === "GET" && url.pathname === "/room-for-root-session") {
+      return json2(res, 200, store.roomForRootSession(query(url).sessionId || ""));
+    }
     if (req.method === "GET" && url.pathname === "/models") {
       const directory = query(url).directory;
       const scoped = directory ? modelCatalogs.get(directory) : void 0;

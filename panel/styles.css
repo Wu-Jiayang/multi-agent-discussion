@@ -84,9 +84,10 @@ textarea { resize: vertical; }
 .message.anchor { outline: 2px solid var(--primary); outline-offset: 6px; border-radius: var(--radius); }
 .message-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
 .message-actions button { border: 0; background: transparent; color: var(--muted); padding: 2px 0; font-size: 12px; }
-.quote { margin: 7px 0; padding: 8px 10px; border-left: 3px solid var(--border); background: var(--panel); border-radius: 0 var(--radius) var(--radius) 0; color: var(--muted); cursor: pointer; }
-.quote-label { font-size: 12px; margin-bottom: 4px; }
-.quote-text { white-space: pre-wrap; color: var(--fg); }
+.quote { display: block; max-width: 100%; margin-block: 5px; padding-block: 2px; padding-inline: 8px; border: 0; border-inline-start: 1px solid var(--border); background: none; color: var(--muted); text-align: start; font: inherit; font-size: 0.85em; }
+button.quote { cursor: pointer; }
+button.quote:hover { color: var(--fg); }
+.quote-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
 .mentions { display: inline-flex; flex-wrap: wrap; gap: 4px; }
 .mention { color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent); border-radius: 999px; padding: 1px 6px; font-size: 12px; }
 .question-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; margin-top: 8px; background: var(--panel); }
