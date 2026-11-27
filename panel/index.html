@@ -10,18 +10,22 @@
   <div id="app">
     <header class="app-header">
       <div class="brand"><span class="brand-mark">◌</span><strong>多智能体讨论室</strong></div>
-      <div class="project-picker-wrap">
-        <div id="project-picker" class="project-picker"></div>
-        <span id="project-hint" class="project-hint" hidden></span>
-      </div>
       <div class="header-actions">
-        <select id="room-select" aria-label="选择讨论室"></select>
+        <div id="room-select" class="room-select"></div>
         <button id="new-room" class="button secondary">新建房间</button>
       </div>
     </header>
     <div id="error" class="error" hidden></div>
+    <div id="room-loading" class="loading" role="status">正在读取讨论室…</div>
+    <button id="retry-rooms" class="button secondary" hidden>重试读取讨论室</button>
     <div id="refresh-error" class="error" role="status" hidden>暂时无法刷新讨论室，正在自动重试。</div>
-    <section id="create-view" class="create-view" hidden></section>
+    <section id="create-view" class="create-view" hidden>
+      <div class="project-picker-wrap">
+        <div id="project-picker" class="project-picker"></div>
+        <span id="project-hint" class="project-hint" hidden></span>
+      </div>
+      <div id="create-form"></div>
+    </section>
     <main id="room-view" class="room-view" hidden>
       <section class="chat-pane">
         <div id="room-header" class="room-header"></div>

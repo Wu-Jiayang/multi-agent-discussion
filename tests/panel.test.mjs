@@ -24,6 +24,8 @@ store.db.prepare("UPDATE members SET creation_status='ready' WHERE room_id=? AND
 store.db.prepare("UPDATE rooms SET status='ready', root_creation_status='ready' WHERE id=?").run(created.roomId);
 store.post(created.roomId,{kind:'human',memberId:created.human.memberId},{text:'第一条消息'});
 const room=store.roomSummary(store.room(created.roomId));
+room.projectDir='/workspace/demo';
+const otherRoom={...room,roomId:'r_other',title:'另一个讨论室',projectDir:'/workspace/other'};
 room.members=room.members.map((member,index)=>({...member,sessionId:'ses_'+member.memberId,sessionStatus:index?'running':'idle'}));
 const members=room.members;
 members[0].lastError='probe 返回 401：invalid api key';
@@ -34,6 +36,9 @@ let messages=store.history(room.roomId,{viewerMemberId:room.human.memberId,track
 let questions=[{questionId:'q_1',messageId:'m_question_1',roomSeq:2,asker:members[1],createdAt:new Date().toISOString(),status:'pending',text:'选择哪种方案？',options:['甲','乙'],preview:true},{questionId:'q_2',messageId:'m_question_2',roomSeq:3,asker:members[0],createdAt:new Date().toISOString(),status:'pending',text:'第二个问题',options:[],preview:true}];
 let holdRoomRefresh = false;
 let heldRoomRequestId;
+let savedViewRequestId;
+let firstQuestionsRequestId;
+let releaseFirstQuestions = false;
 function response(m,payload={}){dom.window.dispatchEvent(new dom.window.MessageEvent('message',{data:{channel:'openchamber.sdk',v:1,type:'result',id:m.id,ok:true,payload},source:dom.window.parent}));}
 function mountPanel() {
  return new JSDOM(html,{runScripts:'dangerously',url:'http://local/panel/index.html',pretendToBeVisual:true,virtualConsole,beforeParse(window){
@@ -45,8 +50,12 @@ function mountPanel() {
   parent.postMessage = message => {
     hostCalls.push({type:message.type,payload:message.payload});
     queueMicrotask(()=>{
-       if(message.type==='hello'){window.dispatchEvent(new window.MessageEvent('message',{data:{channel:'openchamber.sdk',v:1,type:'ready',payload:{theme:{mode:'dark',tokens},locale:'zh-CN',directory:'/workspace/demo',session:null,surface:'page',item:null,connection:null,settings:{},device:{formFactor:'desktop',pointer:'fine',insets:{top:0,right:0,bottom:0,left:0},keyboard:0}}},source:window.parent}));return}
-      if(message.type==='storage'){const op=message.payload.op;response({id:message.id},{op,storage:op==='get'?{op:'get',found:false}:{op}});return}
+       if(message.type==='hello'){window.dispatchEvent(new window.MessageEvent('message',{data:{channel:'openchamber.sdk',v:1,type:'ready',payload:{theme:{mode:'dark',tokens},locale:'zh-CN',directory:null,session:null,surface:'page',item:null,connection:null,settings:{},device:{formFactor:'desktop',pointer:'fine',insets:{top:0,right:0,bottom:0,left:0},keyboard:0}}},source:window.parent}));return}
+      if(message.type==='storage'){
+        const op=message.payload.op;
+        if(op==='get'){savedViewRequestId=message.id;return}
+        response({id:message.id},{storage:true,op});return;
+      }
       if(message.type==='workspace-read'){response({id:message.id},{kind:'projects',state:'ready',projects});return}
       if(message.type==='workspace-subscribe'){
         response({id:message.id},{ok:true});
@@ -63,14 +72,23 @@ function mountPanel() {
           if(directory==='/workspace/other')data={models:[{providerID:'probe',id:'global',name:'全局模型',providerName:'Probe'}],source:'global'};
           else data={models:[{providerID:'probe',id:'a',name:'模型 A',variant:'high',providerName:'Probe'},{providerID:'probe',id:'b',name:'模型 B',providerName:'Probe'}],source:'project'};
         }
-        else if(p.path==='/rooms')data={rooms:[room]};
+        else if(p.path==='/rooms'){
+          assert.ok(savedViewRequestId,'room list is requested while saved view is still loading');
+          response({id:savedViewRequestId},{storage:true,op:'get',found:true,value:{roomId:room.roomId}});
+          data={rooms:[otherRoom,room]};
+        }
+        else if(p.path==='/rooms/'+otherRoom.roomId)data=otherRoom;
+        else if(p.path.startsWith('/rooms/'+otherRoom.roomId+'/'))data={items:[],previousCursor:null,nextCursor:null};
         else if(p.path==='/rooms/'+room.roomId+''){
           if (holdRoomRefresh) { heldRoomRequestId = message.id; return; }
           data=room;
         }
         else if(p.path==='/rooms/'+room.roomId+'/timeline')data={items:messages,previousCursor:null,nextCursor:null};
         else if(p.path.includes('/context'))data={items:messages};
-        else if(p.path==='/rooms/'+room.roomId+'/questions')data=p.query?.cursor?{items:questions.slice(1),status:'pending',nextCursor:null}:{items:questions.slice(0,1),status:'pending',nextCursor:'next-page'};
+        else if(p.path==='/rooms/'+room.roomId+'/questions'){
+          if(!releaseFirstQuestions){firstQuestionsRequestId=message.id;return}
+          data=p.query?.cursor?{items:questions.slice(1),status:'pending',nextCursor:null}:{items:questions.slice(0,1),status:'pending',nextCursor:'next-page'};
+        }
         else if(p.path==='/rooms/'+room.roomId+'/mentions')data={items:[...members.map(m=>({id:m.memberId,label:m.displayName,kind:'agent'})),{id:'@all',label:'所有人',kind:'all'}]};
         else if(p.path.startsWith('/rooms/'+room.roomId+'/members/')&&p.path.endsWith('/model')&&p.method==='POST'){const input=JSON.parse(p.body);const memberId=p.path.split('/')[4];const member=room.members.find(item=>item.memberId===memberId);if(member){member.model=input.model;member.lastError=null;member.failureCount=0;member.wakeBackoffUntil=null;}data={status:'updated',memberId,model:input.model}}
         else if(p.path==='/rooms/'+room.roomId+'/messages'&&p.method==='POST'){const input=JSON.parse(p.body);const seq=room.latestSeq+1;const message={messageId:'m_new_'+seq,roomSeq:seq,author:room.human,isOwn:true,kind:'post',createdAt:new Date().toISOString(),mentions:[],mentionAll:false,replyToMessageId:input.replyToMessageId||null,questionId:null,questionStatus:null,answerMessageId:null,label:'[#'+seq+' 房主 · 人类 · 你]',text:input.text,options:[],full:true,preview:false};messages.push(message);room.latestSeq=seq;data={status:'stored',messageId:message.messageId,roomSeq:seq,timeline:messages.slice(-8)}}
@@ -116,6 +134,11 @@ function chooseListOption(root,labelPart){
   option.click();
 }
 await waitFor(()=>document.querySelector('#room-header').textContent.includes('测试讨论'),'room header');
+await waitFor(()=>!document.querySelector('#room-view').hidden&&document.querySelector('#timeline').textContent.includes('第一条消息'),'chat shows before questions arrive');
+assert.match(document.querySelector('#question-list').textContent,/正在读取问题/);
+releaseFirstQuestions=true;
+response({id:firstQuestionsRequestId},{status:200,body:JSON.stringify({items:questions.slice(0,1),status:'pending',nextCursor:'next-page'})});
+await waitFor(()=>document.querySelector('.question-item'),'questions load after chat is visible');
 assert.ok(document.querySelector('#room-header').textContent.includes('根会话'),'room header shows root session');
 assert.ok(document.querySelector('#room-header').textContent.includes('已就绪'),'room header shows root session readiness');
 assert.ok(document.querySelector('#room-header').textContent.includes('Probe · 模型 A (high)'),'room header shows provider, model and variant');
@@ -151,12 +174,15 @@ assert.ok(rootSessionButton,'root session button is present');
 assert.equal(rootSessionButton.dataset.session,room.rootSessionId);
 rootSessionButton.click();
 await waitFor(()=>hostCalls.some(call=>call.type==='open-session'&&call.payload?.sessionId===room.rootSessionId),'root session opens');
-assert.ok(document.querySelector('#project-picker .oc-sdk-trigger'),'project picker is mounted');
-await waitFor(()=>document.querySelector('#project-picker .oc-sdk-trigger').textContent.includes('Demo 项目'),'project picker follows the host directory');
-assert.ok(serviceCalls.some(call=>call.path==='/rooms'&&call.query?.projectDir==='/workspace/demo'),'rooms load for the selected project');
+assert.ok(document.querySelector('#project-picker').closest('#create-view').hidden,'project picker is hidden while reading');
+assert.ok(serviceCalls.some(call=>call.path==='/rooms'&&!call.query?.projectDir),'rooms load without a host directory');
 assert.ok(serviceCalls.some(call=>call.path==='/models'&&call.query?.directory==='/workspace/demo'),'models load for the selected project');
 assert.equal(document.querySelectorAll('#timeline .message').length,1);
 assert.ok(document.querySelector('#composer-text'));
+chooseSdkOption(document.querySelector('#room-select'),'另一个讨论室');
+await waitFor(()=>!document.querySelector('#room-view').hidden&&document.querySelector('#room-header').textContent.includes('另一个讨论室'),'room picker switches across projects');
+chooseSdkOption(document.querySelector('#room-select'),'测试讨论');
+await waitFor(()=>!document.querySelector('#room-view').hidden&&document.querySelector('#room-header').textContent.includes('测试讨论'),'room picker returns to the first room');
 document.querySelector('[data-action="more-questions"]').click();
 await waitFor(()=>document.querySelector('#question-list').textContent.includes('第二个问题'),'second question page');
 room.rootCreationStatus='failed';room.rootCreationError='模拟根会话失败';
@@ -198,9 +224,6 @@ const composer=document.querySelector('#composer-text');composer.value='UI 发�
 await waitFor(()=>document.querySelector('#timeline').textContent.includes('UI 发帖'),'post sent');
 document.querySelector('[data-action="receipts"]').click();await waitFor(()=>document.querySelector('#modal').hasAttribute('open'),'receipts modal');assert.ok(document.querySelector('#modal-content').textContent.includes('提案者'));
 document.querySelector('[data-action="close-modal"]').click();
-chooseSdkOption(document.querySelector('#project-picker'),'另一个项目');
-await waitFor(()=>document.querySelector('#project-picker .oc-sdk-trigger').textContent.includes('另一个项目'),'project switch');
-await waitFor(()=>serviceCalls.some(call=>call.path==='/rooms'&&call.query?.projectDir==='/workspace/other'),'rooms load for switched project');
 await waitFor(()=>!document.querySelector('#room-view').hidden && document.querySelector('#room-header').textContent.includes('根会话创建失败：模拟根会话失败'),'failed root session shows its error');
 const pauseButton = document.querySelector('[data-action="pause"]');
 pauseButton.click();
@@ -255,6 +278,8 @@ await waitFor(()=>room.status==='ended'&&!document.querySelector('[data-action="
 assert.deepEqual(nativeDialogCalls,[],'sandboxed panel never uses native confirm or prompt');
 document.querySelector('#new-room').click();
 await waitFor(()=>!document.querySelector('#create-view').hidden,'create view after project switch');
+chooseSdkOption(document.querySelector('#project-picker'),'另一个项目');
+await waitFor(()=>document.querySelector('#project-picker .oc-sdk-trigger').textContent.includes('另一个项目'),'creation project switch');
 await waitFor(()=>document.querySelector('#model-source-hint').textContent.includes('其他项目'),'global model fallback hint');
 assert.ok(serviceCalls.some(call=>call.path==='/models'&&call.query?.directory==='/workspace/other'),'models reload for switched project');
 assert.deepEqual(errors,[]);
